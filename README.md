@@ -1336,3 +1336,4 @@ The foundation is in place. Next development steps:
 - [ ] **Ticket embedding** — store `pgvector` embeddings of `description` for similar-ticket lookup
 - [ ] **Alembic autogenerate CI check** — fail PR if model changes are not reflected in a new migration
 - [ ] **Sentry integration** — enable when `SENTRY_DSN` is set
+# PropRelay
