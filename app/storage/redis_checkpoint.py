@@ -6,6 +6,7 @@ where they paused — survives process restarts and horizontal scaling.
 """
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
@@ -26,6 +27,18 @@ logger = structlog.get_logger(__name__)
 _CHECKPOINT_PREFIX = "lg:ckpt"
 _WRITES_PREFIX = "lg:writes"
 _DEFAULT_TTL = 86_400 * 7  # 7 days — active workflows outlive 24 h photo wait
+
+
+def _encode_typed(data: tuple[str, bytes]) -> list[str]:
+    """JSON-safe encoding for serde.dumps_typed() output."""
+    typ, blob = data
+    return [typ, base64.b64encode(blob).decode("ascii")]
+
+
+def _decode_typed(data: list[str]) -> tuple[str, bytes]:
+    """Reverse _encode_typed for serde.loads_typed()."""
+    typ, b64 = data
+    return typ, base64.b64decode(b64)
 
 
 class RedisCheckpointSaver(BaseCheckpointSaver):
@@ -67,7 +80,7 @@ class RedisCheckpointSaver(BaseCheckpointSaver):
     ) -> Iterator[CheckpointTuple]:
         raise NotImplementedError("Use alist in async context")
 
-  # ── Async API ─────────────────────────────────────────────────────────
+    # ── Async API ─────────────────────────────────────────────────────────
 
     def _thread_id(self, config: dict) -> str:
         return config["configurable"]["thread_id"]
@@ -87,7 +100,7 @@ class RedisCheckpointSaver(BaseCheckpointSaver):
 
         try:
             payload = json.loads(raw)
-            checkpoint = self.serde.loads_typed(payload["checkpoint"])
+            checkpoint = self.serde.loads_typed(_decode_typed(payload["checkpoint"]))
             metadata = payload.get("metadata", {})
             parent_config = payload.get("parent_config")
             return CheckpointTuple(
@@ -121,7 +134,7 @@ class RedisCheckpointSaver(BaseCheckpointSaver):
         }
 
         payload = {
-            "checkpoint": self.serde.dumps_typed(checkpoint),
+            "checkpoint": _encode_typed(self.serde.dumps_typed(checkpoint)),
             "metadata": metadata,
             "parent_config": config,
         }

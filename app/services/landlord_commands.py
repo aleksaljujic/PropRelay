@@ -14,13 +14,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from datetime import datetime, timezone
+
 from app.config import settings
 from app.core.redis import get_redis
 from app.models.building import Building
+from app.models.contractor import Contractor
 from app.models.landlord import Landlord
 from app.models.tenant import Tenant
+from app.models.ticket import Ticket, TicketStatus
 from app.services.onboarding_service import initiate_tenant_onboarding
 from app.services.rent_service import format_status_for_landlord, get_rent_status, mark_paid
+from app.services.ticket_service import set_ticket_status
 from app.services.whatsapp import send_text_message
 
 _PENDING_DELETE_TTL = 300    # 5 min to confirm delete
@@ -228,6 +233,82 @@ _TOOLS: list[dict] = [
         },
     },
     {
+        "name": "list_contractors",
+        "description": (
+            "List all contractors/workers in the landlord's roster. "
+            "Use when landlord says 'workers', 'contractors', 'repairmen', "
+            "'show workers', 'who can fix things', 'list contractors', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "list_tickets",
+        "description": (
+            "List recent maintenance tickets across the landlord's portfolio. "
+            "Use when landlord says 'tickets', 'jobs', 'open issues', 'show maintenance', "
+            "'what needs fixing', 'pending work', etc. "
+            "Returns OPEN tickets by default — set status='all' to include closed ones."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Optional filter: 'open' (default), 'all', or a specific status like 'completed', 'dispatched'.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "mark_ticket_done",
+        "description": (
+            "Mark a maintenance ticket as completed/resolved. "
+            "Use when landlord says 'done', 'fixed', 'completed', 'close ticket', 'resolved', etc. "
+            "Requires the ticket NUMBER from the list shown by list_tickets."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticket_number": {
+                    "type": "string",
+                    "description": "The list number of the ticket (1, 2, 3...). Type 'tickets' first to see the list.",
+                },
+            },
+            "required": ["ticket_number"],
+        },
+    },
+    {
+        "name": "message_tenant",
+        "description": (
+            "Send a direct WhatsApp message to a specific tenant. "
+            "Use when landlord says 'message <name>', 'tell <name> ...', 'text tenant <name>', etc. "
+            "Requires either a tenant NUMBER from the list, or a name that can be matched."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tenant_number": {
+                    "type": "string",
+                    "description": "List number of the tenant (1, 2, 3...). Use 'tenants' to see the list.",
+                },
+                "name_hint": {
+                    "type": "string",
+                    "description": "Tenant name (partial match) if no number was given. Optional.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The message body to send to the tenant.",
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
         "name": "show_help",
         "description": "Show the landlord what they can do. Use when they say 'help', 'what can I do', or the message is unclear.",
         "input_schema": {
@@ -373,6 +454,14 @@ async def handle_landlord_command(
         await _exec_rent_overview(landlord, db)
     elif tool_name == "list_tenants":
         await _exec_list_tenants(landlord, db)
+    elif tool_name == "list_contractors":
+        await _exec_list_contractors(landlord, db)
+    elif tool_name == "list_tickets":
+        await _exec_list_tickets(landlord, tool_input, db)
+    elif tool_name == "mark_ticket_done":
+        await _exec_mark_ticket_done(landlord, tool_input, db)
+    elif tool_name == "message_tenant":
+        await _exec_message_tenant(landlord, tool_input, db)
     elif tool_name == "reset_workflow":
         await _exec_reset_workflow(landlord, tool_input, db)
     elif tool_name == "show_help":
@@ -696,19 +785,246 @@ async def _exec_reset_workflow(landlord: Landlord, params: dict, db: AsyncSessio
 async def _exec_help(landlord: Landlord) -> None:
     await _reply(
         landlord.phone_number,
-        "👋 *PropFlow — what you can say:*\n\n"
-        "➕ *Add tenant:* _register_ or _add new tenant_\n"
-        "   → I'll ask for phone and apartment step by step\n"
-        "📋 *List tenants:* _who are my tenants_\n"
-        "🗑️ *Remove tenant:* _remove 2_ (use number from list)\n"
-        "🔄 *Reset stuck tenant:* _reset 1_ (clears stuck workflow)\n\n"
-        "💰 *Rent:*\n"
-        "  _who paid rent_ — full overview\n"
-        "  _mark paid 1_ — mark tenant #1 as paid\n"
-        "  _mark paid 2 amount 800_ — partial payment\n\n"
-        "Type *cancel* at any time to stop what you're doing.\n"
-        "You can write naturally — I'll understand! 🤖",
+        "👋 *PropRelay — what you can say:*\n\n"
+        "👤 *Tenants*\n"
+        "  • _register_ or _add new tenant_ — guided onboarding\n"
+        "  • _tenants_ — numbered list of your tenants\n"
+        "  • _remove 2_ — delete tenant #2\n"
+        "  • _reset 1_ — clear a stuck conversation\n"
+        "  • _message 1 Hello, I'm raising rent by €50_ — DM tenant #1\n\n"
+        "👷 *Workers / contractors*\n"
+        "  • _workers_ — full roster with specialties\n"
+        "  • _add electrician John, phone +49170...._\n\n"
+        "🛠 *Maintenance tickets*\n"
+        "  • _tickets_ — open jobs across all buildings\n"
+        "  • _tickets all_ — include resolved ones\n"
+        "  • _done 1_ — mark ticket #1 as fixed\n"
+        "  • Approval ping arrives automatically — reply *YES / NO* or send a custom message\n\n"
+        "💰 *Rent*\n"
+        "  • _rent_ — payment status overview\n"
+        "  • _mark paid 1_ — record full rent for tenant #1\n"
+        "  • _mark paid 2 amount 800_ — partial payment\n\n"
+        "_Type *cancel* anytime to stop. Write naturally — AI understands._",
     )
+
+
+async def _exec_list_contractors(landlord: Landlord, db: AsyncSession) -> None:
+    result = await db.execute(
+        select(Contractor)
+        .where(Contractor.landlord_id == landlord.id)
+        .order_by(Contractor.name)
+    )
+    contractors = list(result.scalars().all())
+
+    if not contractors:
+        await _reply(
+            landlord.phone_number,
+            "👷 No contractors yet.\n\nAdd one: _add plumber John, phone +49170123456_",
+        )
+        return
+
+    redis = await get_redis()
+    mapping = {str(i): str(c.id) for i, c in enumerate(contractors, 1)}
+    await redis.setex(f"contractor_list:{landlord.phone_number}", 600, json.dumps(mapping))
+
+    lines = ["👷 *Your workers:*\n"]
+    for i, c in enumerate(contractors, 1):
+        status = "✅" if c.active else "🚫"
+        specs = ", ".join(c.specialties or []) or "—"
+        lang = (c.language or "en").upper()
+        lines.append(
+            f"*{i}.* {status} {c.name} ({lang})\n"
+            f"    📞 {c.phone_number}\n"
+            f"    🔧 {specs}"
+        )
+    lines.append("\n_AI auto-dispatches based on specialty when you approve a ticket._")
+
+    await _reply(landlord.phone_number, "\n".join(lines))
+
+
+async def _exec_list_tickets(landlord: Landlord, params: dict, db: AsyncSession) -> None:
+    status_filter = str(params.get("status") or "open").strip().lower()
+
+    q = (
+        select(Ticket)
+        .join(Tenant, Ticket.tenant_id == Tenant.id)
+        .where(Tenant.landlord_id == landlord.id)
+        .order_by(Ticket.created_at.desc())
+        .limit(20)
+    )
+    if status_filter == "open":
+        # Open = anything not closed
+        closed = {TicketStatus.completed, TicketStatus.rejected, TicketStatus.self_resolved}
+        result = await db.execute(q)
+        tickets = [t for t in result.scalars().all() if t.status not in closed]
+    elif status_filter == "all":
+        result = await db.execute(q)
+        tickets = list(result.scalars().all())
+    else:
+        # Specific status name
+        try:
+            target = TicketStatus(status_filter)
+            result = await db.execute(q.where(Ticket.status == target))
+            tickets = list(result.scalars().all())
+        except ValueError:
+            result = await db.execute(q)
+            tickets = list(result.scalars().all())
+
+    if not tickets:
+        await _reply(landlord.phone_number, f"🛠 No {status_filter} tickets right now.")
+        return
+
+    # Load tenants in a single query for names + units
+    tenant_ids = list({t.tenant_id for t in tickets})
+    t_result = await db.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))
+    tenants_by_id = {tt.id: tt for tt in t_result.scalars().all()}
+
+    redis = await get_redis()
+    mapping = {str(i): str(t.id) for i, t in enumerate(tickets, 1)}
+    await redis.setex(f"ticket_list:{landlord.phone_number}", 600, json.dumps(mapping))
+
+    status_emoji = {
+        TicketStatus.new: "🆕",
+        TicketStatus.triaged: "🔎",
+        TicketStatus.awaiting_landlord: "⏳",
+        TicketStatus.approved: "✅",
+        TicketStatus.dispatched: "📨",
+        TicketStatus.scheduled: "📅",
+        TicketStatus.completed: "🏁",
+        TicketStatus.rejected: "❌",
+        TicketStatus.self_resolved: "💡",
+    }
+    urgency_emoji = {"emergency": "🚨", "high": "🔴", "medium": "🟡", "low": "🟢"}
+
+    title = "open tickets" if status_filter == "open" else f"tickets ({status_filter})"
+    lines = [f"🛠 *Recent {title}:*\n"]
+    for i, t in enumerate(tickets, 1):
+        tenant = tenants_by_id.get(t.tenant_id)
+        tenant_label = (
+            f"{tenant.name} (unit {tenant.unit_number})"
+            if tenant else "Unknown tenant"
+        )
+        emoji = status_emoji.get(t.status, "•")
+        u_emoji = urgency_emoji.get(t.urgency.value if hasattr(t.urgency, "value") else str(t.urgency), "")
+        cat = t.category.value if hasattr(t.category, "value") else str(t.category)
+        desc = (t.ai_diagnosis or t.description or "").strip()
+        if len(desc) > 70:
+            desc = desc[:67] + "..."
+        lines.append(
+            f"*{i}.* {emoji} *{(t.status.value if hasattr(t.status, 'value') else t.status).upper()}*"
+            f"  {u_emoji}{cat}\n"
+            f"    {tenant_label}\n"
+            f"    _{desc}_"
+        )
+    lines.append("\n_To close: *done 1*_")
+
+    await _reply(landlord.phone_number, "\n".join(lines))
+
+
+async def _exec_mark_ticket_done(landlord: Landlord, params: dict, db: AsyncSession) -> None:
+    import uuid as _uuid
+
+    number = str(params.get("ticket_number", "")).strip()
+    redis = await get_redis()
+    raw = await redis.get(f"ticket_list:{landlord.phone_number}")
+    if not raw:
+        await _reply(
+            landlord.phone_number,
+            "⚠️ Type *tickets* first to see the numbered list, then *done <number>*.",
+        )
+        return
+
+    mapping: dict = json.loads(raw)
+    ticket_uuid = mapping.get(number)
+    if not ticket_uuid:
+        await _reply(landlord.phone_number, f"⚠️ No ticket #{number}. Type *tickets* to refresh.")
+        return
+
+    ticket = await db.scalar(select(Ticket).where(Ticket.id == _uuid.UUID(ticket_uuid)))
+    if not ticket:
+        await _reply(landlord.phone_number, "⚠️ Ticket not found.")
+        return
+
+    await set_ticket_status(
+        db, ticket,
+        TicketStatus.completed,
+        resolved_at=datetime.now(timezone.utc),
+    )
+
+    # Notify the tenant their issue is closed
+    tenant = await db.scalar(select(Tenant).where(Tenant.id == ticket.tenant_id))
+    if tenant:
+        try:
+            await send_text_message(
+                tenant.phone_number,
+                f"🏁 Your maintenance ticket has been marked as *resolved* by your landlord. "
+                f"If the issue isn't actually fixed, just reply to this chat and I'll reopen it.",
+            )
+        except Exception as exc:
+            logger.warning("Could not notify tenant of closure", error=str(exc))
+
+    logger.info("Ticket marked done by landlord", ticket_id=ticket_uuid, landlord=landlord.phone_number)
+    await _reply(
+        landlord.phone_number,
+        f"✅ Ticket #{number} marked as *DONE*. Tenant has been notified.",
+    )
+
+
+async def _exec_message_tenant(landlord: Landlord, params: dict, db: AsyncSession) -> None:
+    import uuid as _uuid
+
+    text = str(params.get("text") or "").strip()
+    if not text:
+        await _reply(landlord.phone_number, "⚠️ I need the message text. Example: _message 1 Hello_")
+        return
+
+    number = str(params.get("tenant_number") or "").strip()
+    name_hint = str(params.get("name_hint") or "").strip().lower()
+    tenant: Tenant | None = None
+
+    # 1) Resolve by list number first
+    if number:
+        redis = await get_redis()
+        raw = await redis.get(f"tenant_list:{landlord.phone_number}")
+        if raw:
+            mapping = json.loads(raw)
+            tenant_uuid = mapping.get(number)
+            if tenant_uuid:
+                tenant = await db.scalar(select(Tenant).where(Tenant.id == _uuid.UUID(tenant_uuid)))
+
+    # 2) Else try name match
+    if tenant is None and name_hint:
+        all_t = (await db.execute(
+            select(Tenant).where(Tenant.landlord_id == landlord.id)
+        )).scalars().all()
+        matches = [t for t in all_t if name_hint in t.name.lower()]
+        if len(matches) == 1:
+            tenant = matches[0]
+        elif len(matches) > 1:
+            names = ", ".join(t.name for t in matches[:5])
+            await _reply(
+                landlord.phone_number,
+                f"⚠️ Multiple tenants match _{name_hint}_: {names}.\nUse a number from *tenants* list.",
+            )
+            return
+
+    if tenant is None:
+        await _reply(
+            landlord.phone_number,
+            "⚠️ I couldn't identify which tenant.\nType *tenants* to see the list, then _message 1 ..._",
+        )
+        return
+
+    prefix = f"💬 *Message from your landlord:*\n\n"
+    try:
+        await send_text_message(tenant.phone_number, prefix + text)
+        await _reply(
+            landlord.phone_number,
+            f"✅ Sent to *{tenant.name}* (unit {tenant.unit_number}, {tenant.phone_number}).",
+        )
+        logger.info("Landlord→tenant message sent", from_=landlord.phone_number, to=tenant.phone_number)
+    except Exception as exc:
+        await _reply(landlord.phone_number, f"⚠️ Delivery failed: `{exc}`")
 
 
 # ---------------------------------------------------------------------------

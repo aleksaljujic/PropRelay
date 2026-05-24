@@ -11,10 +11,16 @@ from app.models.tenant import Tenant
 from app.models.ticket import ConversationRole
 from app.services.ai_service import classify_intent as _classify_intent
 from app.services.ticket_service import create_ticket, sync_conversation_state
+from app.services.whatsapp import send_text_message
 from app.schemas.llm_outputs import IntentClassification, TenantIntent
 from sqlalchemy import select
 
 logger = structlog.get_logger(__name__)
+
+_CONFIRM_ONLY = frozenset({
+    "yes", "y", "ok", "okay", "correct", "da", "tačno", "tacno", "yep", "sure",
+    "ja", "👍", "✅", "no", "ne", "n",
+})
 
 
 async def identify_intent(state: GraphState) -> dict:
@@ -29,6 +35,20 @@ async def identify_intent(state: GraphState) -> dict:
 
     text = state.get("message_text") or ""
     media_id = state.get("media_id")
+
+    # Bare "Yes"/"No" must never spawn a new workflow — those are confirmation replies.
+    if not media_id and text.strip().lower() in _CONFIRM_ONLY:
+        logger.warning("Confirmation-only message at workflow start — ignoring", phone=state.get("phone"), text=text)
+        await send_text_message(
+            state["phone"],
+            "To report a problem, please describe what's wrong and send a photo if you can.\n"
+            "Example: *Monitor is not working* + picture of the issue.",
+        )
+        return {
+            "current_node": "identify_intent",
+            "error": "confirmation_without_context",
+            "completed": True,
+        }
 
     if not text.strip() and not media_id:
         # Truly empty — sticker, reaction, location, etc.

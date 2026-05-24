@@ -16,6 +16,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import async_session_factory
 from app.models.building import Building
+from app.models.contractor import Contractor
 from app.models.landlord import Landlord
 from app.models.tenant import Tenant
 from app.services.onboarding_service import initiate_tenant_onboarding
@@ -231,6 +232,93 @@ async def list_tenants(landlord_phone: str) -> list[TenantOut]:
 # ---------------------------------------------------------------------------
 # GET /admin/landlords
 # ---------------------------------------------------------------------------
+
+class ContractorIn(BaseModel):
+    name: str
+    phone_number: str
+    specialties: list[str]
+    language: str = "en"
+    notes: str | None = None
+
+
+class SeedContractorsRequest(BaseModel):
+    landlord_phone: str
+
+
+DEMO_CONTRACTORS: list[ContractorIn] = [
+    ContractorIn(name="Hans Müller",  phone_number="491701234001", specialties=["plumbing", "general"],   language="de", notes="Available Mon–Fri 8–17"),
+    ContractorIn(name="Stefan Becker", phone_number="491701234002", specialties=["electrical"],            language="de", notes="24/7 emergencies"),
+    ContractorIn(name="Marco Rossi",   phone_number="393331234003", specialties=["hvac", "appliance"],     language="it", notes="Speaks Italian + basic English"),
+    ContractorIn(name="Ahmed Yilmaz",  phone_number="905321234004", specialties=["structural", "general"], language="tr", notes="Specializes in masonry"),
+    ContractorIn(name="Klaus Wagner",  phone_number="491701234005", specialties=["general", "appliance"],  language="de", notes="Handyman, white goods"),
+    ContractorIn(name="Kristina Zivkovic", phone_number="381643492561", specialties=["it", "appliance", "general"], language="en", notes="IIT Service — IT support, monitors, networking, office equipment"),
+]
+
+
+@router.post("/admin/contractors/seed")
+async def seed_contractors(body: SeedContractorsRequest) -> dict:
+    """Idempotent: seed a roster of demo contractors for a landlord."""
+    async with async_session_factory() as db:
+        landlord = await db.scalar(
+            select(Landlord).where(Landlord.phone_number == body.landlord_phone)
+        )
+        if not landlord:
+            raise HTTPException(status_code=404, detail="Landlord not found")
+
+        created, skipped = [], []
+        for c in DEMO_CONTRACTORS:
+            existing = await db.scalar(
+                select(Contractor)
+                .where(Contractor.landlord_id == landlord.id)
+                .where(Contractor.phone_number == c.phone_number)
+            )
+            if existing:
+                skipped.append(c.name)
+                continue
+            db.add(Contractor(
+                landlord_id=landlord.id,
+                name=c.name,
+                phone_number=c.phone_number,
+                specialties=c.specialties,
+                language=c.language,
+                notes=c.notes,
+                active=True,
+            ))
+            created.append(c.name)
+        await db.commit()
+
+    logger.info("Contractors seeded", created=created, skipped=skipped)
+    return {"created": created, "skipped_existing": skipped}
+
+
+@router.post("/admin/contractors")
+async def add_single_contractor(body: ContractorIn, landlord_phone: str) -> dict:
+    async with async_session_factory() as db:
+        landlord = await db.scalar(
+            select(Landlord).where(Landlord.phone_number == landlord_phone)
+        )
+        if not landlord:
+            raise HTTPException(status_code=404, detail="Landlord not found")
+        contractor = Contractor(
+            landlord_id=landlord.id,
+            name=body.name,
+            phone_number=body.phone_number,
+            specialties=body.specialties,
+            language=body.language,
+            notes=body.notes,
+            active=True,
+        )
+        db.add(contractor)
+        await db.commit()
+        await db.refresh(contractor)
+    return {
+        "id": str(contractor.id),
+        "name": contractor.name,
+        "phone_number": contractor.phone_number,
+        "specialties": contractor.specialties,
+        "language": contractor.language,
+    }
+
 
 @router.get("/admin/landlords")
 async def list_landlords() -> list[dict]:
