@@ -1,0 +1,30 @@
+version: "3.9"
+
+# Development overrides — run with:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Or just start only the infrastructure services for local dev:
+#   docker-compose -f docker-compose.dev.yml up postgres redis
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./app:/app/app          # hot-reload on code changes
+      - ./alembic:/app/alembic  # alembic migrations
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DEBUG=true
+      - APP_ENV=development
+    ports:
+      - "8000:8000"
+
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
