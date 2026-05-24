@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: #08080F;
+    color: #EEE8DC;
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #08080F;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #252540;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #D4AF61;
+  }
+
+  ::selection {
+    background: rgba(212, 175, 97, 0.25);
+    color: #EEE8DC;
+  }
+}
+
+@layer components {
+  .btn-gold {
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-lg font-semibold text-sm
+           bg-gold-gradient text-[#08080F] transition-all duration-200
+           hover:shadow-gold-lg hover:scale-[1.02] active:scale-[0.98];
+  }
+
+  .btn-outline {
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-lg font-semibold text-sm
+           border border-border text-ink-primary transition-all duration-200
+           hover:border-gold-400 hover:text-gold-300 active:scale-[0.98];
+  }
+
+  .card {
+    @apply bg-card border border-border rounded-xl shadow-card;
+  }
+
+  .input-field {
+    @apply w-full bg-surface border border-border rounded-lg px-4 py-3 text-sm text-ink-primary
+           placeholder-ink-muted outline-none transition-all duration-200
+           focus:border-gold-400 focus:ring-1 focus:ring-gold-400/30;
+  }
+
+  .gold-text {
+    @apply bg-gold-gradient bg-clip-text text-transparent;
+  }
+
+  .nav-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-ink-secondary
+           transition-all duration-200 cursor-pointer relative
+           hover:text-ink-primary hover:bg-elevated;
+  }
+
+  .nav-item.active {
+    @apply text-gold-300 bg-elevated;
+  }
+
+  .nav-item.active::before {
+    content: '';
+    @apply absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-gold-400 rounded-r;
+  }
+
+  .stat-card {
+    @apply card p-6 flex flex-col gap-3;
+  }
+
+  .section-divider {
+    @apply border-t border-border;
+  }
+}
+
+/* Subtle animated gradient for hero */
+@keyframes gradient-shift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+.hero-gradient {
+  background: radial-gradient(ellipse at 20% 50%, rgba(212,175,97,0.06) 0%, transparent 50%),
+              radial-gradient(ellipse at 80% 20%, rgba(180,140,80,0.04) 0%, transparent 50%),
+              #08080F;
+}
+
+.glow-gold {
+  box-shadow: 0 0 60px rgba(212,175,97,0.08), 0 0 120px rgba(212,175,97,0.04);
+}
