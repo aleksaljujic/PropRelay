@@ -18,7 +18,7 @@ from app.models.contractor import Contractor
 logger = structlog.get_logger(__name__)
 
 VALID_SPECIALTIES = frozenset(
-    {"plumbing", "electrical", "hvac", "structural", "appliance", "general", "it"}
+    {"plumbing", "electrical", "hvac", "structural", "appliance", "general"}
 )
 
 
@@ -76,21 +76,7 @@ async def get_contractors_by_specialty(
     are small (< 50) so this is fine.
     """
     all_contractors = await get_contractors_by_landlord(db, landlord_id, active_only=True)
-    matched = [c for c in all_contractors if specialty in (c.specialties or [])]
-
-    # IT / monitor / office equipment — prefer dedicated IT contractors first.
-    if specialty in ("appliance", "general"):
-        it_specialists = [c for c in all_contractors if "it" in (c.specialties or [])]
-        seen: set = set()
-        ordered: list[Contractor] = []
-        for c in it_specialists + matched:
-            if c.id not in seen:
-                ordered.append(c)
-                seen.add(c.id)
-        if ordered:
-            return ordered
-
-    return matched
+    return [c for c in all_contractors if specialty in (c.specialties or [])]
 
 
 async def deactivate_contractor(

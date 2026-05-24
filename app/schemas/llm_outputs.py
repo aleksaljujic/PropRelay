@@ -51,14 +51,8 @@ class DiagnosisResult(BaseModel):
     severity: Literal["minor", "serious"]
     urgency: Literal["low", "medium", "high", "emergency"]
     diagnosis: str = Field(max_length=2000)
-    root_cause: str | None = Field(default=None, max_length=500)
-    safety_risk: Literal["none", "low", "medium", "high"] = "none"
-    safety_notes: str | None = Field(default=None, max_length=500)
     estimated_cost_min: int | None = Field(default=None, ge=0)
     estimated_cost_max: int | None = Field(default=None, ge=0)
-    estimated_duration_minutes: int | None = Field(default=None, ge=0)
-    parts_needed: list[str] = Field(default_factory=list)
-    tools_needed: list[str] = Field(default_factory=list)
     self_help_steps: list[str] = Field(default_factory=list)
     requires_professional: bool = True
 
@@ -80,11 +74,5 @@ class ApprovalSummary(BaseModel):
     category: str
     urgency: str
     diagnosis: str
-    root_cause: str | None = None
-    safety_risk: str = "none"
-    safety_notes: str | None = None
     estimated_cost: str
-    estimated_duration_minutes: int | None = None
-    parts_needed: list[str] = Field(default_factory=list)
-    tools_needed: list[str] = Field(default_factory=list)
     recommended_action: str

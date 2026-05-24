@@ -49,20 +49,13 @@ async def diagnose_issue(state: GraphState) -> dict:
         if self_fix_text
         else []
     )
-    cost = raw.get("estimated_cost_eur") or {}
     result = DiagnosisResult(
         category=IssueCategory(raw.get("contractor_specialty") or "general"),
         severity="serious" if raw.get("severity") in ("serious", "critical") else "minor",
         urgency=raw.get("urgency") or "medium",
         diagnosis=raw.get("diagnosis") or "See attached photo",
-        root_cause=raw.get("root_cause"),
-        safety_risk=raw.get("safety_risk") or "none",
-        safety_notes=raw.get("safety_notes"),
-        estimated_cost_min=cost.get("min"),
-        estimated_cost_max=cost.get("max"),
-        estimated_duration_minutes=raw.get("estimated_duration_minutes"),
-        parts_needed=raw.get("parts_needed") or [],
-        tools_needed=raw.get("tools_needed") or [],
+        estimated_cost_min=(raw.get("estimated_cost_eur") or {}).get("min"),
+        estimated_cost_max=(raw.get("estimated_cost_eur") or {}).get("max"),
         self_help_steps=self_help_steps,
         requires_professional=raw.get("recommended_action") != "self_fix",
     )

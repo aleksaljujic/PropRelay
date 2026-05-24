@@ -28,10 +28,6 @@ class Contractor(Base, TimestampMixin):
     notes: Mapped[Optional[str]] = mapped_column(
         Text, comment='e.g. "only available Tuesday-Thursday"'
     )
-    language: Mapped[str] = mapped_column(
-        String(8), nullable=False, default="en",
-        comment="BCP-47 language code for translated WhatsApp messages",
-    )
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Relationships

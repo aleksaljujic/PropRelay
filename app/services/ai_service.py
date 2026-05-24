@@ -115,41 +115,41 @@ async def diagnose_from_image(
 ) -> dict:
     """
     Analyze maintenance issue from image using Claude Vision.
-    Returns a STRUCTURED inspection report — see schema in system prompt.
+    Uses Sonnet — needed for vision capability.
+
+    Returns:
+    {
+        "diagnosis": "detailed description of the problem",
+        "severity": "minor|moderate|serious|critical",
+        "recommended_action": "self_fix|contractor_needed|emergency",
+        "self_fix_instructions": "step by step if applicable, else null",
+        "estimated_cost_eur": {"min": 0, "max": 0},
+        "contractor_specialty": "plumbing|electrical|etc or null"
+    }
     """
     image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
 
     response = await client.messages.create(
         model=settings.anthropic_model_smart,
-        max_tokens=1024,
-        system="""You are an expert property maintenance diagnostician with 20 years of field experience.
-Inspect the photo carefully and return ONLY valid JSON, no markdown, no prose.
+        max_tokens=512,
+        system="""You are an expert property maintenance diagnostician.
+Analyze the image and return ONLY valid JSON, no markdown.
 
-JSON schema (every field required):
+JSON schema:
 {
-  "diagnosis": "1–2 sentence description of what is visibly wrong",
-  "root_cause": "the underlying cause, not just the symptom (1 sentence)",
+  "diagnosis": "clear description of what you see",
   "severity": "minor|moderate|serious|critical",
-  "urgency": "low|medium|high|emergency",
-  "safety_risk": "none|low|medium|high",
-  "safety_notes": "1 sentence — what could go wrong if left, or null",
   "recommended_action": "self_fix|contractor_needed|emergency",
-  "self_fix_instructions": "step-by-step if recommended_action=self_fix, else null",
-  "parts_needed": ["array of specific parts/materials, e.g. 'compression fitting 15mm'", "..."],
-  "tools_needed": ["array of professional tools required"],
-  "estimated_duration_minutes": 60,
-  "estimated_cost_eur": {"min": 80, "max": 140, "labor_min": 50, "labor_max": 90, "parts_min": 30, "parts_max": 50},
-  "contractor_specialty": "plumbing|electrical|hvac|structural|appliance|general"
+  "self_fix_instructions": "step by step instructions or null",
+  "estimated_cost_eur": {"min": 0, "max": 0},
+  "contractor_specialty": "plumbing|electrical|hvac|structural|appliance|general|null"
 }
 
 Severity guide:
-- critical: immediate risk to health/safety (gas, flood, electrical danger, fire)
+- critical: immediate risk to health/safety (gas, flood, electrical danger)
 - serious: significant damage, urgent repair needed
-- moderate: needs repair within days
-- minor: cosmetic or low priority
-
-Be specific. List actual parts with sizes/specs when you can infer them from the photo.
-Cost estimates should be realistic for Western/Central Europe in EUR.""",
+- moderate: needs repair soon but not emergency
+- minor: cosmetic or low priority""",
         messages=[{
             "role": "user",
             "content": [
@@ -165,7 +165,7 @@ Cost estimates should be realistic for Western/Central Europe in EUR.""",
                     "type": "text",
                     "text": (
                         f"Tenant description: {tenant_description}\n"
-                        "Inspect and produce the full structured diagnostic report."
+                        "Please diagnose this maintenance issue."
                     ),
                 },
             ],
@@ -175,48 +175,12 @@ Cost estimates should be realistic for Western/Central Europe in EUR.""",
     text = response.content[0].text.strip()
     return _parse_json(text, fallback={
         "diagnosis": "Could not analyse image — please describe the problem in text.",
-        "root_cause": "unknown — image analysis failed",
         "severity": "minor",
-        "urgency": "medium",
-        "safety_risk": "none",
-        "safety_notes": None,
         "recommended_action": "contractor_needed",
         "self_fix_instructions": None,
-        "parts_needed": [],
-        "tools_needed": [],
-        "estimated_duration_minutes": 60,
         "estimated_cost_eur": None,
         "contractor_specialty": "general",
     })
-
-
-async def translate_message(text: str, target_language: str, context: str = "professional WhatsApp message") -> str:
-    """
-    Translate a message to the target language while preserving emojis, line breaks, and markdown.
-    Returns the original text unchanged if translation fails or target is English.
-    """
-    if not text or not target_language or target_language.lower() in {"en", "eng", "english"}:
-        return text
-    try:
-        response = await client.messages.create(
-            model=settings.anthropic_model_fast,
-            max_tokens=1500,
-            system=(
-                f"You are a professional translator. Translate the user's text into {target_language}.\n"
-                f"Context: {context}.\n"
-                "RULES:\n"
-                "- Preserve ALL emojis, line breaks, and WhatsApp markdown (*bold*, _italic_, dashes).\n"
-                "- Preserve numbers, currency symbols, addresses, and proper nouns (names, building names).\n"
-                "- Keep the tone professional but warm.\n"
-                "- Output ONLY the translated text — no explanation, no quotation marks."
-            ),
-            messages=[{"role": "user", "content": text}],
-        )
-        translated = response.content[0].text.strip()
-        return translated or text
-    except Exception as exc:
-        logger.warning("Translation failed, using original", error=str(exc), target=target_language)
-        return text
 
 
 async def generate_tenant_reply(

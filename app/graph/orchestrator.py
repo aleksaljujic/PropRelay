@@ -16,16 +16,12 @@ from app.graph.context import NodeContext, node_context
 from app.graph.state import GraphState
 from app.models.landlord import Landlord
 from app.models.tenant import Tenant
-from app.models.ticket import ConversationState, Ticket
-from app.services.ticket_service import get_ticket
 from app.storage.redis_checkpoint import RedisCheckpointSaver
 from app.workers.timeout_scheduler import cancel_timeouts_for_thread
 
 from app.storage.pending_routes import get_contractor_pending_thread, get_landlord_pending_thread
 
 logger = structlog.get_logger(__name__)
-
-_TENANT_CONFIRM = frozenset({"yes", "y", "ok", "correct", "da", "tačno", "tacno", "yep", "sure", "ja", "👍", "✅"})
 
 
 class MaintenanceOrchestrator:
@@ -51,55 +47,8 @@ class MaintenanceOrchestrator:
         config = {"configurable": {"thread_id": thread_id}}
 
         state_patch = self._message_to_patch(message)
-        snapshot = await self._graph.aget_state(config)
-        reply_text = state_patch.get("message_text", "").strip()
-        is_confirm_reply = (
-            not state_patch.get("media_id")
-            and reply_text
-            and (reply_text.lower() in _TENANT_CONFIRM or len(reply_text) < 4)
-        )
+        initial = self._base_state(tenant) if not await self._has_checkpoint(config) else {}
 
-        # Graph is paused mid-workflow — resume with the reply, never restart.
-        if snapshot and snapshot.next:
-            logger.info(
-                "Tenant reply resumes interrupted workflow",
-                thread_id=thread_id,
-                next_nodes=list(snapshot.next),
-            )
-            if state_patch.get("media_id"):
-                return await self._run_graph(
-                    db, config, state_patch, thread_id, resume=True,
-                )
-            return await self._run_graph(
-                db,
-                config,
-                {"resume_value": reply_text},
-                thread_id,
-                resume=True,
-            )
-
-        # Stale DB session without checkpoint — only recover on YES, not new photos.
-        awaiting_confirmation = await self._is_awaiting_tenant_confirmation(db, thread_id)
-        if awaiting_confirmation:
-            await self._checkpointer.adelete_thread(thread_id)
-            if is_confirm_reply:
-                logger.warning(
-                    "Recovering workflow after tenant YES (checkpoint was missing)",
-                    thread_id=thread_id,
-                )
-                return await self._fast_forward_to_landlord(tenant, db, thread_id, config)
-            if reply_text and reply_text.lower() not in _TENANT_CONFIRM and len(reply_text) >= 4:
-                logger.info("New problem report — clearing stale confirmation session", thread_id=thread_id)
-                await self._clear_stale_workflow(db, thread_id)
-            elif reply_text:
-                return await self._fast_forward_to_landlord(
-                    tenant, db, thread_id, config, tenant_note=reply_text,
-                )
-            else:
-                await self._clear_stale_workflow(db, thread_id)
-
-        # Fresh workflow — seed full tenant context + inbound message fields.
-        initial = self._base_state(tenant)
         merged = {**initial, **state_patch}
         return await self._run_graph(db, config, merged, thread_id)
 
@@ -184,19 +133,34 @@ class MaintenanceOrchestrator:
 
             if resume and snapshot and snapshot.next:
                 logger.info("Resuming graph", thread_id=thread_id, next_nodes=snapshot.next)
-                resume_payload = input_state.get("resume_value", input_state)
                 result = await self._graph.ainvoke(
-                    Command(resume=resume_payload),
+                    Command(resume=input_state.get("resume_value", input_state)),
                     config=config,
                 )
             elif snapshot and snapshot.next:
-                # Should not happen for tenant path — dispatch_tenant_message handles it.
-                logger.warning("Interrupted graph reached _run_graph without resume flag", thread_id=thread_id)
-                resume_payload = input_state.get("resume_value") or input_state.get("message_text", "")
-                result = await self._graph.ainvoke(
-                    Command(resume=resume_payload),
-                    config=config,
-                )
+                # Graph interrupted — merge new message data and resume
+                logger.info("Resuming interrupted graph with update", thread_id=thread_id)
+                if input_state.get("media_id"):
+                    # For image messages pass full dict so diagnose_issue gets media_id
+                    result = await self._graph.ainvoke(
+                        Command(resume=input_state),
+                        config=config,
+                    )
+                else:
+                    # First update state (e.g. new message_text in case node needs it)
+                    result = await self._graph.ainvoke(
+                        Command(update=input_state),
+                        config=config,
+                    )
+                    # If still interrupted, resume with plain text so interrupt()
+                    # return value is a simple string (not a dict)
+                    snap2 = await self._graph.aget_state(config)
+                    if snap2.next:
+                        resume_text = input_state.get("message_text", "")
+                        result = await self._graph.ainvoke(
+                            Command(resume=resume_text),
+                            config=config,
+                        )
             else:
                 logger.info("Starting new graph invocation", thread_id=thread_id)
                 full_state: GraphState = {**self._empty_state(), **input_state}  # type: ignore[typeddict-unknown-key]
@@ -218,74 +182,6 @@ class MaintenanceOrchestrator:
             raise
         finally:
             node_context.reset(token)
-
-    async def _is_awaiting_tenant_confirmation(self, db: AsyncSession, phone: str) -> bool:
-        """DB fallback when Redis checkpoint is missing or corrupt."""
-        row = await db.scalar(
-            select(ConversationState).where(ConversationState.phone_number == phone)
-        )
-        if not row:
-            return False
-        ctx = row.context or {}
-        return row.state == "confirm_with_tenant" or ctx.get("awaiting") == "tenant_confirmation"
-
-    async def _fast_forward_to_landlord(
-        self,
-        tenant: Tenant,
-        db: AsyncSession,
-        thread_id: str,
-        config: dict,
-        *,
-        tenant_note: str | None = None,
-    ) -> dict:
-        """
-        Recover a broken checkpoint: tenant already confirmed, jump to landlord approval.
-        """
-        row = await db.scalar(
-            select(ConversationState).where(ConversationState.phone_number == thread_id)
-        )
-        ticket = None
-        if row and row.current_ticket_id:
-            ticket = await get_ticket(db, str(row.current_ticket_id))
-
-        diagnosis = (ticket.ai_diagnosis if ticket else None) or "Issue reported by tenant"
-        if tenant_note:
-            diagnosis = f"{diagnosis}\nTenant adds: {tenant_note}"
-
-        media_id = None
-        media_mime = "image/jpeg"
-        if ticket and ticket.media_urls:
-            for ref in ticket.media_urls:
-                if ref.startswith("meta://"):
-                    media_id = ref.replace("meta://", "", 1)
-                    break
-
-        recovered: GraphState = {
-            **self._base_state(tenant),
-            "ticket_id": str(ticket.id) if ticket else None,
-            "intent": "maintenance",
-            "category": ticket.category.value if ticket and hasattr(ticket.category, "value") else "general",
-            "urgency": ticket.urgency.value if ticket and hasattr(ticket.urgency, "value") else "medium",
-            "severity": "minor",
-            "diagnosis": diagnosis,
-            "tenant_confirmed": True,
-            "message_text": ticket.description if ticket else "",
-            "media_id": media_id,
-            "media_mime": media_mime,
-            "context": {"tenant_note": tenant_note} if tenant_note else {},
-        }
-        return await self._run_graph(db, config, recovered, thread_id)
-
-    async def _clear_stale_workflow(self, db: AsyncSession, phone: str) -> None:
-        """Drop a leftover confirmation session so a new report can start cleanly."""
-        row = await db.scalar(
-            select(ConversationState).where(ConversationState.phone_number == phone)
-        )
-        if row:
-            row.state = "completed"
-            row.context = {}
-            await db.commit()
-        await self._checkpointer.adelete_thread(phone)
 
     async def _has_checkpoint(self, config: dict) -> bool:
         snap = await self._graph.aget_state(config)
