@@ -23,6 +23,7 @@ from app.api.router import api_router
 from app.config import settings
 from app.core.redis import close_redis, get_redis
 from app.database import engine
+from app.workers.timeout_worker import start_timeout_worker, stop_timeout_worker
 
 # ---------------------------------------------------------------------------
 # Structured logging setup
@@ -48,32 +49,29 @@ async def lifespan(app: FastAPI):  # noqa: ANN001
     # ── Startup ────────────────────────────────────────────────────────────
     logger.info("PropFlow starting", env=settings.app_env, debug=settings.debug)
 
-    # TODO: uncomment when Docker is running
-    # # Verify database
-    # try:
-    #     async with engine.begin() as conn:
-    #         await conn.execute(text("SELECT 1"))
-    #     logger.info("Database connection OK")
-    # except Exception as exc:
-    #     logger.error("Database connection FAILED", error=str(exc))
-    #     raise
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+        logger.info("Database connection OK")
+    except Exception as exc:
+        logger.warning("Database connection check failed", error=str(exc))
 
-    # # Verify Redis
-    # try:
-    #     redis = await get_redis()
-    #     await redis.ping()
-    #     logger.info("Redis connection OK")
-    # except Exception as exc:
-    #     logger.error("Redis connection FAILED", error=str(exc))
-    #     raise
+    try:
+        redis = await get_redis()
+        await redis.ping()
+        logger.info("Redis connection OK")
+    except Exception as exc:
+        logger.warning("Redis connection check failed", error=str(exc))
 
+    start_timeout_worker()
     logger.info("PropFlow ready", version="0.1.0")
     yield
 
     # ── Shutdown ───────────────────────────────────────────────────────────
     logger.info("PropFlow shutting down")
-    # await engine.dispose()  # TODO: uncomment when Docker is running
-    # await close_redis()     # TODO: uncomment when Docker is running
+    await stop_timeout_worker()
+    await engine.dispose()
+    await close_redis()
     logger.info("PropFlow stopped")
 
 

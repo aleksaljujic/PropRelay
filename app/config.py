@@ -38,6 +38,14 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: str = ""
+    claude_model: str = "claude-sonnet-4-20250514"
+    claude_max_retries: int = 3
+
+    # Orchestration timeouts (seconds)
+    timeout_photo_reminder_seconds: int = 86_400  # 24 h
+    timeout_landlord_escalation_seconds: int = 1_800  # 30 min
+    timeout_contractor_confirm_seconds: int = 900  # 15 min
+    timeout_worker_poll_seconds: float = 5.0
 
     # Sentry (optional)
     sentry_dsn: str = ""

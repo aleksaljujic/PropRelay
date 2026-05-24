@@ -151,7 +151,7 @@ async def test_unknown_number_gets_rejection(db: AsyncSession, seed_data):
     assert len(sent_messages) == 1
     phone, text = sent_messages[0]
     assert phone == "999000000000"
-    assert "nicht in unserem System" in text
+    assert "not registered" in text.lower()
 
 
 @pytest.mark.asyncio
@@ -191,7 +191,7 @@ async def test_pending_tenant_gets_welcome_on_onboarding(db: AsyncSession, seed_
     assert len(sent_messages) == 1
     phone, text = sent_messages[0]
     assert phone == tenant_pending.phone_number
-    assert "Wie heißen Sie" in text
+    assert "full name" in text.lower()
     assert "Test Building" in text
 
 
@@ -266,7 +266,7 @@ async def test_name_too_short_asks_again(db: AsyncSession, seed_data):
 
     # Bot asked again
     assert len(sent_messages) == 1
-    assert "vollständigen Namen" in sent_messages[0][1]
+    assert "full name" in sent_messages[0][1].lower()
 
 
 @pytest.mark.asyncio

@@ -1,19 +1,20 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
 # Install uv
 RUN pip install --no-cache-dir uv
 
-# Copy dependency manifest
 COPY pyproject.toml ./
 
-# Install all runtime dependencies
-RUN uv pip install --system \
+RUN uv pip install --system -r pyproject.toml 2>/dev/null || uv pip install --system \
     "fastapi>=0.111.0" \
     "uvicorn[standard]>=0.30.0" \
     "sqlalchemy[asyncio]>=2.0.0" \
     "asyncpg>=0.29.0" \
+    "aiosqlite>=0.20.0" \
     "alembic>=1.13.0" \
     "pgvector>=0.3.0" \
     "redis[asyncio]>=5.0.0" \
@@ -21,10 +22,11 @@ RUN uv pip install --system \
     "pydantic>=2.7.0" \
     "pydantic-settings>=2.3.0" \
     "anthropic>=0.30.0" \
+    "langgraph>=0.2.60" \
+    "langgraph-checkpoint>=2.0.0" \
     "python-multipart>=0.0.9" \
     "structlog>=24.1.0"
 
-# Copy application code
 COPY . .
 
 EXPOSE 8000

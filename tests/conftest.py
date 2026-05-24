@@ -12,8 +12,8 @@ from httpx import ASGITransport, AsyncClient
 @pytest.fixture(autouse=True)
 def mock_infrastructure():
     """
-    Patch DB engine and Redis client at the module level so that the FastAPI
-    lifespan does not require real PostgreSQL / Redis connections.
+    Patch DB engine, Redis, WhatsApp, and orchestrator so tests run without
+    live infrastructure or background side effects.
     """
     mock_conn = AsyncMock()
     mock_conn.execute = AsyncMock(return_value=MagicMock())
@@ -26,10 +26,22 @@ def mock_infrastructure():
 
     mock_redis = AsyncMock()
     mock_redis.ping = AsyncMock(return_value=True)
+    mock_redis.get = AsyncMock(return_value=None)
+    mock_redis.setex = AsyncMock()
+    mock_redis.zadd = AsyncMock()
+    mock_redis.zrangebyscore = AsyncMock(return_value=[])
 
     with (
         patch("app.main.engine", mock_engine),
         patch("app.main.get_redis", AsyncMock(return_value=mock_redis)),
+        patch("app.api.v1.webhook.get_tenant_by_phone", AsyncMock(return_value=None)),
+        patch("app.api.v1.webhook.send_text_message", AsyncMock(return_value={})),
+        patch("app.api.v1.webhook.orchestrator.dispatch_tenant_message", AsyncMock(return_value={})),
+        patch("app.api.v1.webhook.lookup_landlord_by_phone", AsyncMock(return_value=None)),
+        patch("app.graph.orchestrator.orchestrator.dispatch_tenant_message", AsyncMock(return_value={})),
+        patch("app.graph.orchestrator.orchestrator.dispatch_landlord_message", AsyncMock(return_value=None)),
+        patch("app.graph.orchestrator.orchestrator.dispatch_contractor_message", AsyncMock(return_value=None)),
+        patch("app.workers.timeout_worker.start_timeout_worker"),
     ):
         yield
 

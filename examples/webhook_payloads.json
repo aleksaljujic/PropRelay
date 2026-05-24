@@ -1,0 +1,97 @@
+{
+  "webhook_verify": {
+    "method": "GET",
+    "url": "http://localhost:8000/api/v1/webhook?hub.mode=subscribe&hub.verify_token=propflow-dev-verify-token&hub.challenge=test_challenge_123",
+    "expected_response": "test_challenge_123"
+  },
+  "tenant_maintenance_text": {
+    "method": "POST",
+    "url": "http://localhost:8000/api/v1/webhook",
+    "headers": {"Content-Type": "application/json"},
+    "body": {
+      "object": "whatsapp_business_account",
+      "entry": [{
+        "id": "123",
+        "changes": [{
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {"phone_number_id": "1218577381329996"},
+            "messages": [{
+              "from": "4915123456789",
+              "id": "wamid.maintenance001",
+              "type": "text",
+              "text": {"body": "The bathroom pipe is leaking badly"},
+              "timestamp": "1700000000"
+            }]
+          },
+          "field": "messages"
+        }]
+      }]
+    },
+    "expected_response": {"status": "ok"},
+    "graph_flow": "START -> identify_intent -> request_photo (interrupt)"
+  },
+  "tenant_maintenance_photo": {
+    "method": "POST",
+    "url": "http://localhost:8000/api/v1/webhook",
+    "body": {
+      "object": "whatsapp_business_account",
+      "entry": [{
+        "id": "123",
+        "changes": [{
+          "value": {
+            "messaging_product": "whatsapp",
+            "messages": [{
+              "from": "4915123456789",
+              "id": "wamid.image001",
+              "type": "image",
+              "image": {
+                "id": "media_id_abc123",
+                "mime_type": "image/jpeg",
+                "caption": "Here is the leak"
+              },
+              "timestamp": "1700000001"
+            }]
+          },
+          "field": "messages"
+        }]
+      }]
+    },
+    "graph_flow": "request_photo (resume) -> diagnose_issue -> prepare_approval | self_help"
+  },
+  "landlord_approval_yes": {
+    "method": "POST",
+    "url": "http://localhost:8000/api/v1/webhook",
+    "body": {
+      "object": "whatsapp_business_account",
+      "entry": [{
+        "id": "123",
+        "changes": [{
+          "value": {
+            "messaging_product": "whatsapp",
+            "messages": [{
+              "from": "4916098765432",
+              "id": "wamid.landlord001",
+              "type": "text",
+              "text": {"body": "YES"},
+              "timestamp": "1700000100"
+            }]
+          },
+          "field": "messages"
+        }]
+      }]
+    },
+    "graph_flow": "notify_landlord (resume) -> find_contractor -> dispatch_contractor"
+  },
+  "tenant_complaint": {
+    "method": "POST",
+    "body_snippet": {
+      "text": {"body": "My neighbors are very loud every night"}
+    },
+    "graph_flow": "START -> identify_intent -> log_complaint -> END"
+  },
+  "workflow_status": {
+    "method": "GET",
+    "url": "http://localhost:8000/api/v1/workflows/4915123456789"
+  }
+}

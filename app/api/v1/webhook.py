@@ -11,6 +11,7 @@ from fastapi.responses import PlainTextResponse
 from app.config import settings
 from app.core.redis import get_conversation_state
 from app.database import async_session_factory
+from app.graph.orchestrator import lookup_landlord_by_phone, orchestrator
 from app.services.onboarding_service import (
     UNKNOWN_NUMBER_MSG,
     handle_onboarding_reply,
@@ -18,6 +19,8 @@ from app.services.onboarding_service import (
 )
 from app.services.tenant_lookup import get_tenant_by_phone
 from app.services.whatsapp import send_text_message
+from app.models.contractor import Contractor
+from sqlalchemy import select
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -86,24 +89,36 @@ async def _handle_incoming_message(message: dict, value: dict) -> None:
     msg_type: str = message.get("type", "unknown")
     message_id: str = message.get("id", "")
 
-    # Extract text body (empty string for non-text messages)
     text_body = ""
     if msg_type == "text":
         text_body = message.get("text", {}).get("body", "")
-    elif msg_type == "image":
-        logger.info("Image received", media_id=message.get("image", {}).get("id", ""))
-    elif msg_type == "audio":
-        logger.info("Audio received", media_id=message.get("audio", {}).get("id", ""))
-    elif msg_type == "video":
-        logger.info("Video received", media_id=message.get("video", {}).get("id", ""))
-    elif msg_type == "document":
-        logger.info("Document received", media_id=message.get("document", {}).get("id", ""))
 
     log = logger.bind(phone=sender_phone, message_id=message_id, type=msg_type)
     log.info("Message received", text=text_body or f"[{msg_type}]")
 
     async with async_session_factory() as db:
-        # ── Step 1: identify sender ──────────────────────────────────────────
+        # ── Landlord replies (approval flow) ───────────────────────────────
+        landlord = await lookup_landlord_by_phone(db, sender_phone)
+        if landlord and msg_type == "text":
+            result = await orchestrator.dispatch_landlord_message(landlord, text_body, db)
+            if result is not None:
+                log.info("Landlord message routed to orchestrator")
+                return
+
+        # ── Contractor replies (confirm flow) ──────────────────────────────
+        if msg_type == "text":
+            contractor = await db.scalar(
+                select(Contractor).where(Contractor.phone_number == sender_phone)
+            )
+            if contractor:
+                result = await orchestrator.dispatch_contractor_message(
+                    sender_phone, text_body, db
+                )
+                if result is not None:
+                    log.info("Contractor message routed to orchestrator")
+                    return
+
+        # ── Tenant flow ────────────────────────────────────────────────────
         tenant = await get_tenant_by_phone(sender_phone, db)
 
         if not tenant:
@@ -111,33 +126,34 @@ async def _handle_incoming_message(message: dict, value: dict) -> None:
             await send_text_message(sender_phone, UNKNOWN_NUMBER_MSG)
             return
 
-        # ── Step 2: check Redis conversation state ───────────────────────────
         conv_state = None
         try:
             conv_state = await get_conversation_state(sender_phone)
         except Exception as exc:
             log.warning("Redis unavailable", error=str(exc))
 
-        # ── Step 3: route by state ───────────────────────────────────────────
         if conv_state and conv_state.get("state") == "awaiting_name":
             await handle_onboarding_reply(sender_phone, text_body, db)
             return
 
         if tenant.name == "Pending":
-            # Re-trigger onboarding if state was lost (e.g. Redis restart)
             log.info("Tenant pending — re-initiating onboarding")
             await initiate_tenant_onboarding(tenant)
             return
 
-        # ── Step 4: fully registered tenant ─────────────────────────────────
+        # ── LangGraph maintenance orchestration ─────────────────────────────
         log.info(
-            "Tenant identified",
+            "Tenant identified — dispatching to orchestrator",
             name=tenant.name,
             unit=tenant.unit_number,
             building=tenant.building.name,
         )
-        await send_text_message(
-            sender_phone,
-            f"Got it, {tenant.name}! Your message has been received. We'll get back to you shortly.",
-        )
-        # TODO: await agent_router.dispatch(tenant, message)
+        try:
+            await orchestrator.dispatch_tenant_message(tenant, message, db)
+        except Exception as exc:
+            log.exception("Orchestrator failed", error=str(exc))
+            await send_text_message(
+                sender_phone,
+                "Sorry, we hit a technical issue processing your request. "
+                "Please try again in a few minutes.",
+            )
