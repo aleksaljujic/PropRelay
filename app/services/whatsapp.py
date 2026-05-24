@@ -34,7 +34,7 @@ async def send_text_message(phone: str, text: str) -> dict:
         text:  Message body (max 4096 chars)
 
     Returns:
-        Meta API response JSON
+        Meta API response JSON, or {} on failure (never raises).
     """
     payload = {
         "messaging_product": "whatsapp",
@@ -50,8 +50,21 @@ async def send_text_message(phone: str, text: str) -> dict:
             headers=_headers(),
         )
         if response.is_error:
-            logger.error("Meta API error", status=response.status_code, body=response.text, phone=phone)
-        response.raise_for_status()
+            logger.error(
+                "Meta API error",
+                status=response.status_code,
+                body=response.text,
+                phone=phone,
+            )
+            if response.status_code == 401:
+                logger.error(
+                    "WhatsApp token expired — refresh META_ACCESS_TOKEN at "
+                    "developers.facebook.com → WhatsApp → API Setup"
+                )
+                # Raise so callers fail loudly: no silent interrupt checkpoints saved
+                response.raise_for_status()
+            # Non-auth errors (recipient not on WA, rate limit, etc.) — log but don't crash
+            return {}
         data = response.json()
         logger.info("Text message sent", phone=phone, message_id=data.get("messages", [{}])[0].get("id"))
         return data
@@ -98,7 +111,11 @@ async def send_template_message(
             json=payload,
             headers=_headers(),
         )
-        response.raise_for_status()
+        if response.is_error:
+            logger.error("Meta API error (template)", status=response.status_code, body=response.text, phone=phone)
+            if response.status_code == 401:
+                response.raise_for_status()
+            return {}
         data = response.json()
         logger.info("Template message sent", phone=phone, template=template)
         return data

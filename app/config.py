@@ -36,10 +36,13 @@ class Settings(BaseSettings):
     # E.164 digits only, no "+"
     test_landlord_phone: str = ""
 
-    # Anthropic
+    # Anthropic Claude API
+    # anthropic_model_smart → Vision AI diagnosis and complex reasoning (Sonnet)
+    # anthropic_model_fast  → intent classification and simple responses (Haiku)
     anthropic_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-20250514"
-    claude_max_retries: int = 3
+    anthropic_model_smart: str = "claude-sonnet-4-20250514"
+    anthropic_model_fast: str = "claude-haiku-4-5-20251001"
+    llm_max_retries: int = 3
 
     # Orchestration timeouts (seconds)
     timeout_photo_reminder_seconds: int = 86_400  # 24 h

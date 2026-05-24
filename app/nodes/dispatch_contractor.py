@@ -34,13 +34,17 @@ async def dispatch_contractor(state: GraphState) -> dict:
     tenant_phone = state["phone"]
 
     if contractor_phone:
-        ticket_ref = state.get("ticket_id", "")[:8]
-        await send_text_message(
-            contractor_phone,
-            f"New job assigned (#{ticket_ref}): {state.get('building_name')} "
-            f"unit {state.get('unit_number')}. Issue: {state.get('diagnosis', 'See ticket')}. "
-            f"Reply CONFIRM to accept.",
+        # Use landlord-approved message if available, else fallback
+        contractor_msg = (
+            state.get("contractor_message")
+            or (
+                f"New job at {state.get('building_name')} unit {state.get('unit_number')}.\n"
+                f"Issue: {state.get('diagnosis', 'See ticket')}.\n"
+                f"Urgency: {(state.get('urgency') or 'medium').upper()}.\n"
+                f"Reply CONFIRM to accept."
+            )
         )
+        await send_text_message(contractor_phone, contractor_msg)
         await register_contractor_pending(contractor_phone, state["thread_id"])
         await schedule_timeout(
             kind=TimeoutKind.CONTRACTOR_CONFIRM,

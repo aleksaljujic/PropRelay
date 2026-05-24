@@ -65,6 +65,8 @@ class GraphState(TypedDict, total=False):
     contractor_phone: str | None
     contractor_candidates: list[str]  # ordered contractor UUID strings
     contractor_attempt: int
+    contractor_message: str | None  # final message sent to contractor (landlord-approved)
+    tenant_confirmed: bool | None   # tenant confirmed/enriched the diagnosis
 
     # ── Audit / errors ────────────────────────────────────────────────────
     messages: Annotated[list[Any], add_messages]

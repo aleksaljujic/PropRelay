@@ -53,3 +53,6 @@ class Tenant(Base, TimestampMixin):
     tickets: Mapped[list["Ticket"]] = relationship(  # noqa: F821
         "Ticket", back_populates="tenant"
     )
+    rent_payments: Mapped[list["RentPayment"]] = relationship(  # noqa: F821
+        "RentPayment", back_populates="tenant", cascade="all, delete-orphan"
+    )

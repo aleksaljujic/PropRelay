@@ -21,7 +21,7 @@ RUN uv pip install --system -r pyproject.toml 2>/dev/null || uv pip install --sy
     "httpx>=0.27.0" \
     "pydantic>=2.7.0" \
     "pydantic-settings>=2.3.0" \
-    "anthropic>=0.30.0" \
+    "google-genai>=1.0.0" \
     "langgraph>=0.2.60" \
     "langgraph-checkpoint>=2.0.0" \
     "python-multipart>=0.0.9" \

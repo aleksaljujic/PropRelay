@@ -141,20 +141,24 @@ class MaintenanceOrchestrator:
                 # Graph interrupted — merge new message data and resume
                 logger.info("Resuming interrupted graph with update", thread_id=thread_id)
                 if input_state.get("media_id"):
+                    # For image messages pass full dict so diagnose_issue gets media_id
                     result = await self._graph.ainvoke(
                         Command(resume=input_state),
                         config=config,
                     )
                 else:
+                    # First update state (e.g. new message_text in case node needs it)
                     result = await self._graph.ainvoke(
                         Command(update=input_state),
                         config=config,
                     )
-                    # If still interrupted, try resume with message content
+                    # If still interrupted, resume with plain text so interrupt()
+                    # return value is a simple string (not a dict)
                     snap2 = await self._graph.aget_state(config)
                     if snap2.next:
+                        resume_text = input_state.get("message_text", "")
                         result = await self._graph.ainvoke(
-                            Command(resume=input_state),
+                            Command(resume=resume_text),
                             config=config,
                         )
             else:

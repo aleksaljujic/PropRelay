@@ -1,4 +1,4 @@
-"""Vision AI diagnosis — Claude analyzes tenant photo."""
+"""Vision AI diagnosis — Claude Vision analyzes tenant photo."""
 from __future__ import annotations
 
 import structlog
@@ -6,7 +6,8 @@ import structlog
 from app.graph.context import get_node_context
 from app.graph.state import GraphState
 from app.models.ticket import ConversationRole, TicketStatus
-from app.services.claude_service import claude_service
+from app.schemas.llm_outputs import DiagnosisResult, IssueCategory
+from app.services.ai_service import diagnose_from_image as _diagnose_from_image
 from app.services.ticket_service import get_ticket, sync_conversation_state, update_ticket_from_diagnosis
 from app.services.whatsapp import download_media
 
@@ -35,11 +36,28 @@ async def diagnose_issue(state: GraphState) -> dict:
         logger.error("Media download failed", error=str(exc))
         return {"error": f"media_download_failed: {exc}"}
 
-    result = await claude_service.diagnose_image(
+    raw = await _diagnose_from_image(
         image_bytes,
         mime_type=mime,
-        description=description,
+        tenant_description=description,
         language=state.get("language", "de"),
+    )
+    # Map raw dict → validated DiagnosisResult schema
+    self_fix_text = raw.get("self_fix_instructions") or ""
+    self_help_steps = (
+        [step.strip() for step in self_fix_text.split("\n") if step.strip()]
+        if self_fix_text
+        else []
+    )
+    result = DiagnosisResult(
+        category=IssueCategory(raw.get("contractor_specialty") or "general"),
+        severity="serious" if raw.get("severity") in ("serious", "critical") else "minor",
+        urgency=raw.get("urgency") or "medium",
+        diagnosis=raw.get("diagnosis") or "See attached photo",
+        estimated_cost_min=(raw.get("estimated_cost_eur") or {}).get("min"),
+        estimated_cost_max=(raw.get("estimated_cost_eur") or {}).get("max"),
+        self_help_steps=self_help_steps,
+        requires_professional=raw.get("recommended_action") != "self_fix",
     )
 
     media_ref = f"meta://{media_id}"

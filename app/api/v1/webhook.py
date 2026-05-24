@@ -12,6 +12,7 @@ from app.config import settings
 from app.core.redis import get_conversation_state
 from app.database import async_session_factory
 from app.graph.orchestrator import lookup_landlord_by_phone, orchestrator
+from app.services.landlord_commands import handle_landlord_command
 from app.services.onboarding_service import (
     UNKNOWN_NUMBER_MSG,
     handle_onboarding_reply,
@@ -100,10 +101,31 @@ async def _handle_incoming_message(message: dict, value: dict) -> None:
         # ── Landlord replies (approval flow) ───────────────────────────────
         landlord = await lookup_landlord_by_phone(db, sender_phone)
         if landlord and msg_type == "text":
+            # Commands first: register, tenants, help
+            try:
+                if await handle_landlord_command(landlord, text_body, db):
+                    log.info("Landlord command handled", text=text_body)
+                    return
+            except Exception as exc:
+                log.exception("Landlord command error", error=str(exc))
+                await send_text_message(
+                    sender_phone,
+                    "⚠️ Something went wrong processing your command.\nType *help* to see available commands.",
+                )
+                return
+
+            # YES/NO approval routing
             result = await orchestrator.dispatch_landlord_message(landlord, text_body, db)
             if result is not None:
                 log.info("Landlord message routed to orchestrator")
                 return
+
+            # Unrecognised landlord message — show hint, never fall through to tenant flow
+            await send_text_message(
+                sender_phone,
+                "Type *help* to see available commands.\n\nExample: `register 381641234567 3A`",
+            )
+            return
 
         # ── Contractor replies (confirm flow) ──────────────────────────────
         if msg_type == "text":
@@ -152,8 +174,11 @@ async def _handle_incoming_message(message: dict, value: dict) -> None:
             await orchestrator.dispatch_tenant_message(tenant, message, db)
         except Exception as exc:
             log.exception("Orchestrator failed", error=str(exc))
-            await send_text_message(
-                sender_phone,
-                "Sorry, we hit a technical issue processing your request. "
-                "Please try again in a few minutes.",
-            )
+            try:
+                await send_text_message(
+                    sender_phone,
+                    "Sorry, we hit a technical issue processing your request. "
+                    "Please try again in a few minutes.",
+                )
+            except Exception as send_exc:
+                log.warning("Could not send error reply to tenant", error=str(send_exc))

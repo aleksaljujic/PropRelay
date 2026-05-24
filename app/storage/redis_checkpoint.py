@@ -16,7 +16,6 @@ from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
-    get_checkpoint_id,
 )
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
@@ -111,7 +110,7 @@ class RedisCheckpointSaver(BaseCheckpointSaver):
         thread_id = self._thread_id(config)
         redis = await get_redis()
 
-        checkpoint_id = get_checkpoint_id(checkpoint)
+        checkpoint_id = checkpoint.get("id") if isinstance(checkpoint, dict) else getattr(checkpoint, "id", None)
         updated_config = {
             **config,
             "configurable": {

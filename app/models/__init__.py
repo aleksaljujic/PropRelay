@@ -4,6 +4,7 @@ from app.models.landlord import Landlord
 from app.models.building import Building
 from app.models.tenant import Tenant
 from app.models.contractor import Contractor
+from app.models.rent_payment import RentPayment
 from app.models.ticket import (
     ConversationRole,
     ConversationState,
@@ -21,6 +22,7 @@ __all__ = [
     "Building",
     "Tenant",
     "Contractor",
+    "RentPayment",
     "Ticket",
     "ConversationState",
     "TicketStatus",

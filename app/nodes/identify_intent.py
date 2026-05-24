@@ -1,4 +1,4 @@
-"""Classify tenant intent using Claude — routing is deterministic from output."""
+"""Classify tenant intent via Claude — routing is deterministic from output."""
 from __future__ import annotations
 
 import uuid
@@ -9,9 +9,9 @@ from app.graph.context import get_node_context
 from app.graph.state import GraphState
 from app.models.tenant import Tenant
 from app.models.ticket import ConversationRole
-from app.services.claude_service import claude_service
+from app.services.ai_service import classify_intent as _classify_intent
 from app.services.ticket_service import create_ticket, sync_conversation_state
-from app.schemas.llm_outputs import TenantIntent
+from app.schemas.llm_outputs import IntentClassification, TenantIntent
 from sqlalchemy import select
 
 logger = structlog.get_logger(__name__)
@@ -36,16 +36,41 @@ async def identify_intent(state: GraphState) -> dict:
             "awaiting": "description",
         }
 
-    classification = await claude_service.classify_intent(
-        text,
-        language=state.get("language", "de"),
+    raw = await _classify_intent(text, language=state.get("language", "de"))
+    # Safely coerce LLM intent string → enum, fall back to admin for anything unrecognized
+    raw_intent = raw.get("intent", "admin")
+    try:
+        parsed_intent = TenantIntent(raw_intent)
+    except ValueError:
+        logger.warning("Unrecognized intent from LLM, defaulting to unknown", raw_intent=raw_intent)
+        parsed_intent = TenantIntent.unknown
+
+    # Map raw dict → validated schema for the rest of the graph
+    classification = IntentClassification(
+        intent=parsed_intent,
+        confidence=float(raw.get("confidence") or 0.7),
+        summary=raw.get("reasoning") or text[:200],
+        urgency=raw.get("urgency") or "medium",
     )
     intent = classification.intent.value
-    logger.info("Intent classified", intent=intent, confidence=classification.confidence)
+    category = raw.get("category") or "general"
+    severity = raw.get("severity") or "serious"
+    diagnosis = raw.get("diagnosis") or text[:200]
+
+    logger.info(
+        "Intent classified",
+        intent=intent,
+        confidence=classification.confidence,
+        severity=severity,
+        category=category,
+    )
 
     update: dict = {
         "intent": intent,
         "urgency": classification.urgency,
+        "category": category,
+        "severity": severity,
+        "diagnosis": diagnosis,
         "current_node": "identify_intent",
         "context": {"intent_summary": classification.summary},
     }

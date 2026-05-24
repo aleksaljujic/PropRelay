@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.v1.admin import router as admin_router
 from app.api.v1.orchestration import router as orchestration_router
 from app.api.v1.webhook import router as webhook_router
 
@@ -15,4 +16,10 @@ api_router.include_router(
     orchestration_router,
     prefix="/api/v1",
     tags=["Orchestration"],
+)
+
+api_router.include_router(
+    admin_router,
+    prefix="/api/v1",
+    tags=["Admin"],
 )

@@ -1,5 +1,5 @@
 """
-Strict Pydantic schemas for all Claude outputs.
+Strict Pydantic schemas for all Claude AI outputs.
 
 LangGraph controls workflow routing — Claude only returns structured data
 that nodes use for deterministic decisions.
@@ -13,7 +13,9 @@ from pydantic import BaseModel, Field, field_validator
 class TenantIntent(str, Enum):
     maintenance = "maintenance"
     complaint = "complaint"
+    rent_query = "rent_query"
     admin = "admin"
+    unknown = "unknown"  # LLM fallback — routed same as admin
 
 
 class IntentClassification(BaseModel):

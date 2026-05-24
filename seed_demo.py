@@ -18,8 +18,8 @@ from app.models.tenant import Tenant
 
 # ── Phone numbers — replace with your real test numbers ─────────────────────
 LANDLORD_PHONE   = "381603334933"   # Your WhatsApp number (receives landlord notifications)
-TENANT_1_PHONE   = "381603334933"   # Number that sends messages as an onboarded tenant
-TENANT_2_PHONE   = "381600000002"   # Replace with a second real number to test onboarding
+TENANT_1_PHONE   = "381603334933"   # Number that sends messages as an onboarded tenant (same as landlord for solo testing)
+TENANT_2_PHONE   = "3810643492561"  # Tenant to onboard — will receive welcome message
 #                                     (must be different from TENANT_1_PHONE)
 BUILDING_WA      = "15556402370"    # Meta test phone number
 

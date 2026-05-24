@@ -23,6 +23,7 @@ from app.api.router import api_router
 from app.config import settings
 from app.core.redis import close_redis, get_redis
 from app.database import engine
+from app.models import Base  # noqa: F401 — registers all models incl. RentPayment
 from app.workers.timeout_worker import start_timeout_worker, stop_timeout_worker
 
 # ---------------------------------------------------------------------------
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN001
     try:
         async with engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
+            await conn.run_sync(Base.metadata.create_all)  # creates any new tables (e.g. rent_payments)
         logger.info("Database connection OK")
     except Exception as exc:
         logger.warning("Database connection check failed", error=str(exc))

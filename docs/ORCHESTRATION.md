@@ -34,7 +34,7 @@ graph TD
 | `app/nodes/` | One interaction step per node |
 | `app/graph/orchestrator.py` | Event dispatch + interrupt/resume |
 | `app/storage/redis_checkpoint.py` | Durable graph state |
-| `app/services/claude_service.py` | Isolated LLM reasoning (Pydantic JSON) |
+| `app/services/gemini_service.py` | Isolated LLM reasoning (Pydantic JSON) |
 | `app/workers/timeout_worker.py` | Event-driven reminders/escalations |
 
 ## Local development
@@ -62,7 +62,7 @@ curl http://localhost:8000/api/v1/workflows/<tenant_phone>
 
 ## Design principles
 
-- **LangGraph orchestrates** — Claude never decides the next node
+- **LangGraph orchestrates** — Gemini never decides the next node
 - **One step per node** — no blocking loops
 - **Redis checkpoints** — multi-turn resume across messages
 - **interrupt()** — human-in-the-loop at photo, approval, contractor confirm

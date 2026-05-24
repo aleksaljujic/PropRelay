@@ -1,7 +1,7 @@
 """
 Deterministic routing functions for conditional edges.
 
-LangGraph calls these after each node — Claude never controls routing.
+LangGraph calls these after each node — the LLM never controls routing.
 """
 from __future__ import annotations
 
@@ -11,10 +11,15 @@ from app.graph.state import GraphState
 def route_by_intent(state: GraphState) -> str:
     intent = state.get("intent")
     if intent == "maintenance":
-        return "request_photo"
+        return "confirm_with_tenant"
     if intent == "complaint":
         return "log_complaint"
-    return "forward_to_landlord"
+    if intent == "rent_query":
+        return "rent_status"
+    if intent == "admin":
+        return "forward_to_landlord"
+    # "unknown" or anything unrecognised → ask tenant to clarify (don't bother landlord)
+    return "clarify_intent"
 
 
 def route_by_severity(state: GraphState) -> str:
