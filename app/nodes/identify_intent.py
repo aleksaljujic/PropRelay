@@ -23,6 +23,11 @@ _CONFIRM_ONLY = frozenset({
 })
 
 
+_PHYSICAL_CATEGORIES = frozenset({
+    "plumbing", "electrical", "hvac", "structural", "appliance", "general", "it",
+})
+
+
 async def identify_intent(state: GraphState) -> dict:
     """
     Single step: classify intent via Claude structured output.
@@ -92,16 +97,33 @@ async def identify_intent(state: GraphState) -> dict:
         }
 
     raw = await _classify_intent(text, language=state.get("language", "de"))
-    # Safely coerce LLM intent string → enum, fall back to admin for anything unrecognized
-    raw_intent = raw.get("intent", "admin")
+    raw_intent = raw.get("intent", "maintenance")
     try:
         parsed_intent = TenantIntent(raw_intent)
     except ValueError:
-        # Unknown string from LLM — treat as maintenance so tenant gets a real response
         logger.warning("Unrecognized intent from LLM, defaulting to maintenance", raw_intent=raw_intent)
         parsed_intent = TenantIntent.maintenance
 
-    # Map raw dict → validated schema for the rest of the graph
+    category = raw.get("category") or "general"
+    severity = raw.get("severity") or "serious"
+    diagnosis = raw.get("diagnosis") or text[:200]
+
+    # Photo + caption is always a maintenance report, never admin.
+    if media_id:
+        parsed_intent = TenantIntent.maintenance
+    elif parsed_intent == TenantIntent.admin and (
+        category in _PHYSICAL_CATEGORIES
+        or severity in ("minor", "serious", "critical")
+        or bool(diagnosis.strip())
+    ):
+        logger.info(
+            "Reclassified admin → maintenance",
+            phone=state.get("phone"),
+            category=category,
+            text=text[:80],
+        )
+        parsed_intent = TenantIntent.maintenance
+
     classification = IntentClassification(
         intent=parsed_intent,
         confidence=float(raw.get("confidence") or 0.7),
@@ -109,9 +131,6 @@ async def identify_intent(state: GraphState) -> dict:
         urgency=raw.get("urgency") or "medium",
     )
     intent = classification.intent.value
-    category = raw.get("category") or "general"
-    severity = raw.get("severity") or "serious"
-    diagnosis = raw.get("diagnosis") or text[:200]
 
     logger.info(
         "Intent classified",

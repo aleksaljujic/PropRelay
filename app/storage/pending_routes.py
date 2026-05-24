@@ -78,3 +78,13 @@ async def get_thread_contractor_recommendation(thread_id: str) -> dict | None:
 async def get_contractor_pending_thread(contractor_phone: str) -> str | None:
     redis = await get_redis()
     return await redis.get(f"{_CONTRACTOR_PENDING_PREFIX}{contractor_phone}")
+
+
+async def clear_landlord_pending(landlord_phone: str) -> None:
+    redis = await get_redis()
+    await redis.delete(f"{_LANDLORD_PENDING_PREFIX}{landlord_phone}")
+
+
+async def clear_contractor_pending(contractor_phone: str) -> None:
+    redis = await get_redis()
+    await redis.delete(f"{_CONTRACTOR_PENDING_PREFIX}{contractor_phone}")

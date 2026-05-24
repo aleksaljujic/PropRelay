@@ -1,79 +1,96 @@
-"""Dispatch selected contractor and notify tenant."""
+"""Dispatch selected contractor and notify tenant — one-shot, no extra YES prompts."""
 from __future__ import annotations
 
 import structlog
-from langgraph.types import interrupt
 
-from app.config import settings
 from app.graph.context import get_node_context
-from app.storage.pending_routes import register_contractor_pending
 from app.graph.state import GraphState
 from app.models.ticket import ConversationRole, TicketStatus
 from app.services.ai_service import translate_message
 from app.services.ticket_service import get_ticket, set_ticket_status, sync_conversation_state
 from app.services.whatsapp import forward_image_with_caption, send_text_message
-from app.workers.timeout_scheduler import schedule_timeout, TimeoutKind
 
 logger = structlog.get_logger(__name__)
 
 
-async def dispatch_contractor(state: GraphState) -> dict:
-    """
-    Notify contractor, schedule confirm timeout, notify tenant, complete workflow.
+def _resolve_media_id(state: GraphState) -> tuple[str | None, str]:
+    media_id = state.get("media_id")
+    media_mime = state.get("media_mime") or "image/jpeg"
+    if media_id:
+        return media_id, media_mime
+    for ref in state.get("media_urls") or []:
+        if isinstance(ref, str) and ref.startswith("meta://"):
+            return ref.replace("meta://", "", 1), media_mime
+    return None, media_mime
 
-    Optional interrupt if contractor confirmation is required before closing.
-    """
+
+def _build_work_order(state: GraphState, contractor_name: str) -> str:
+    summary = state.get("context", {}).get("approval_summary") or {}
+    parts = summary.get("parts_needed") or []
+    parts_line = ", ".join(parts) if parts else "TBD on inspection"
+    ticket_ref = (state.get("ticket_id") or "")[:8].upper()
+    return (
+        f"📋 *WORK ORDER #{ticket_ref or 'NEW'}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"*Contractor:* {contractor_name}\n"
+        f"*Building:* {state.get('building_name', '')}\n"
+        f"*Unit:* {state.get('unit_number', '?')}\n"
+        f"*Tenant:* {state.get('tenant_name', '')}\n\n"
+        f"*Issue:*\n{state.get('diagnosis', 'See attached photo')}\n\n"
+        f"*Urgency:* {(state.get('urgency') or 'medium').upper()}\n"
+        f"*Category:* {(state.get('category') or 'general').upper()}\n"
+        f"*Parts:* {parts_line}\n\n"
+        f"Please contact the tenant to schedule the visit.\n"
+        f"No reply needed — this job is assigned to you."
+    )
+
+
+async def _contractor_already_notified(db, ticket_id: str | None) -> bool:
+    if not ticket_id:
+        return False
+    ticket = await get_ticket(db, ticket_id)
+    if not ticket:
+        return False
+    return ticket.status in (TicketStatus.dispatched, TicketStatus.scheduled)
+
+
+async def dispatch_contractor(state: GraphState) -> dict:
+    """Notify contractor with work order + photo, notify tenant, complete workflow."""
     ctx = get_node_context()
     db = ctx.db
 
-    resume = state.get("resume_value")
-    if resume is not None and str(resume).lower() in {"confirmed", "yes", "ja"}:
-        return await _finalize_dispatch(state, db)
+    if await _contractor_already_notified(db, state.get("ticket_id")):
+        logger.info("Contractor dispatch already sent — completing workflow", ticket_id=state.get("ticket_id"))
+        return {"current_node": "dispatch_contractor", "completed": True, "awaiting": None}
 
     contractor_phone = state.get("contractor_phone")
     contractor_name = state.get("contractor_name") or "our contractor"
     tenant_phone = state["phone"]
+    media_id, media_mime = _resolve_media_id(state)
 
     if contractor_phone:
         contractor_language = state.get("context", {}).get("contractor_language", "en")
-
-        contractor_msg = state.get("contractor_message") or (
-            f"New job at {state.get('building_name')} unit {state.get('unit_number')}.\n"
-            f"Issue: {state.get('diagnosis', 'See ticket')}.\n"
-            f"Urgency: {(state.get('urgency') or 'medium').upper()}.\n"
-            f"Reply CONFIRM to accept."
-        )
+        work_order = state.get("contractor_message") or _build_work_order(state, contractor_name)
         if not state.get("contractor_message"):
-            contractor_msg = await translate_message(contractor_msg, contractor_language)
+            work_order = await translate_message(work_order, contractor_language)
 
-        # 1) Forward the photo first so contractor sees what they're walking into
-        if state.get("media_id"):
+        if media_id:
             try:
                 await forward_image_with_caption(
                     contractor_phone,
-                    state["media_id"],
-                    caption="",
-                    mime_type=state.get("media_mime") or "image/jpeg",
+                    media_id,
+                    caption="Tenant photo — see work order below",
+                    mime_type=media_mime,
                 )
             except Exception as exc:
                 logger.warning("Photo forward to contractor failed", error=str(exc))
 
-        # 2) Send the job message
-        await send_text_message(contractor_phone, contractor_msg)
-        await register_contractor_pending(contractor_phone, state["thread_id"])
-        await schedule_timeout(
-            kind=TimeoutKind.CONTRACTOR_CONFIRM,
-            thread_id=state["thread_id"],
-            ticket_id=state.get("ticket_id") or "",
-            phone=tenant_phone,
-            contractor_phone=contractor_phone,
-            contractor_attempt=state.get("contractor_attempt") or 0,
-            delay_seconds=settings.timeout_contractor_confirm_seconds,
-        )
+        await send_text_message(contractor_phone, work_order)
 
     tenant_language = state.get("language") or "en"
+    phone_hint = f" ({contractor_phone})" if contractor_phone else ""
     tenant_confirmation = await translate_message(
-        f"✅ Approved! {contractor_name} has been notified and will contact you shortly.",
+        f"✅ Approved! *{contractor_name}*{phone_hint} has been called and will contact you shortly.",
         tenant_language,
     )
     await send_text_message(tenant_phone, tenant_confirmation)
@@ -87,29 +104,15 @@ async def dispatch_contractor(state: GraphState) -> dict:
         db,
         phone=tenant_phone,
         role=ConversationRole.tenant,
-        state="dispatch_contractor",
-        ticket_id=state.get("ticket_id"),
-    )
-
-    # Pause for contractor confirm; auto-complete if they reply CONFIRM
-    confirm = interrupt({"awaiting": "contractor_confirm"})
-    if confirm and str(confirm).lower() in {"confirmed", "confirm", "yes", "ja"}:
-        return await _finalize_dispatch(state, db)
-    return {"current_node": "dispatch_contractor", "awaiting": "contractor_confirm"}
-
-
-async def _finalize_dispatch(state: GraphState, db) -> dict:
-    if state.get("ticket_id"):
-        ticket = await get_ticket(db, state["ticket_id"])
-        if ticket:
-            await set_ticket_status(db, ticket, TicketStatus.scheduled)
-
-    await sync_conversation_state(
-        db,
-        phone=state["phone"],
-        role=ConversationRole.tenant,
         state="completed",
         ticket_id=state.get("ticket_id"),
     )
-    logger.info("Contractor confirmed", ticket_id=state.get("ticket_id"))
-    return {"current_node": "dispatch_contractor", "completed": True, "awaiting": None}
+
+    logger.info("Contractor dispatched — workflow complete", ticket_id=state.get("ticket_id"))
+    return {
+        "current_node": "dispatch_contractor",
+        "completed": True,
+        "awaiting": None,
+        "contractor_phone": contractor_phone,
+        "landlord_phone": state.get("landlord_phone"),
+    }

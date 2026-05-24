@@ -21,11 +21,18 @@ from app.services.ticket_service import get_ticket
 from app.storage.redis_checkpoint import RedisCheckpointSaver
 from app.workers.timeout_scheduler import cancel_timeouts_for_thread
 
-from app.storage.pending_routes import get_contractor_pending_thread, get_landlord_pending_thread
+from app.storage.pending_routes import (
+    clear_contractor_pending,
+    clear_landlord_pending,
+    get_contractor_pending_thread,
+    get_landlord_pending_thread,
+)
 
 logger = structlog.get_logger(__name__)
 
 _TENANT_CONFIRM = frozenset({"yes", "y", "ok", "correct", "da", "tačno", "tacno", "yep", "sure", "ja", "👍", "✅"})
+_TEXT_RESUME_NODES = frozenset({"confirm_with_tenant", "request_photo"})
+_PHOTO_RESUME_NODES = frozenset({"request_photo"})
 
 
 class MaintenanceOrchestrator:
@@ -59,24 +66,29 @@ class MaintenanceOrchestrator:
             and (reply_text.lower() in _TENANT_CONFIRM or len(reply_text) < 4)
         )
 
-        # Graph is paused mid-workflow — resume with the reply, never restart.
+        # Paused workflow — resume only when the reply matches what we're waiting for.
         if snapshot and snapshot.next:
-            logger.info(
-                "Tenant reply resumes interrupted workflow",
-                thread_id=thread_id,
-                next_nodes=list(snapshot.next),
-            )
+            next_nodes = set(snapshot.next)
             if state_patch.get("media_id"):
+                if next_nodes & _PHOTO_RESUME_NODES:
+                    logger.info("Tenant photo resumes workflow", thread_id=thread_id, next_nodes=list(next_nodes))
+                    return await self._run_graph(db, config, state_patch, thread_id, resume=True)
+                logger.info("New photo report — starting fresh", thread_id=thread_id, stale_next=list(next_nodes))
+                await self._checkpointer.adelete_thread(thread_id)
+                await self._clear_stale_workflow(db, thread_id)
+            elif next_nodes & _TEXT_RESUME_NODES:
+                logger.info("Tenant reply resumes workflow", thread_id=thread_id, next_nodes=list(next_nodes))
                 return await self._run_graph(
-                    db, config, state_patch, thread_id, resume=True,
+                    db,
+                    config,
+                    {"resume_value": reply_text},
+                    thread_id,
+                    resume=True,
                 )
-            return await self._run_graph(
-                db,
-                config,
-                {"resume_value": reply_text},
-                thread_id,
-                resume=True,
-            )
+            else:
+                logger.info("Stale checkpoint — starting fresh report", thread_id=thread_id, stale_next=list(next_nodes))
+                await self._checkpointer.adelete_thread(thread_id)
+                await self._clear_stale_workflow(db, thread_id)
 
         # Stale DB session without checkpoint — only recover on YES, not new photos.
         awaiting_confirmation = await self._is_awaiting_tenant_confirmation(db, thread_id)
@@ -185,16 +197,19 @@ class MaintenanceOrchestrator:
             if resume and snapshot and snapshot.next:
                 logger.info("Resuming graph", thread_id=thread_id, next_nodes=snapshot.next)
                 resume_payload = input_state.get("resume_value", input_state)
-                result = await self._graph.ainvoke(
-                    Command(resume=resume_payload),
-                    config=config,
-                )
+                if isinstance(resume_payload, dict):
+                    result = await self._graph.ainvoke(Command(resume=resume_payload), config=config)
+                else:
+                    # Put resume_value in state so nodes skip re-sending prompts.
+                    result = await self._graph.ainvoke(
+                        Command(update={"resume_value": resume_payload}, resume=resume_payload),
+                        config=config,
+                    )
             elif snapshot and snapshot.next:
-                # Should not happen for tenant path — dispatch_tenant_message handles it.
                 logger.warning("Interrupted graph reached _run_graph without resume flag", thread_id=thread_id)
                 resume_payload = input_state.get("resume_value") or input_state.get("message_text", "")
                 result = await self._graph.ainvoke(
-                    Command(resume=resume_payload),
+                    Command(update={"resume_value": resume_payload}, resume=resume_payload),
                     config=config,
                 )
             else:
@@ -207,6 +222,15 @@ class MaintenanceOrchestrator:
                     await cancel_timeouts_for_thread(thread_id)
                 except Exception as exc:
                     logger.warning("Failed to cancel timeouts", error=str(exc))
+                try:
+                    landlord_phone = result.get("landlord_phone")
+                    if landlord_phone:
+                        await clear_landlord_pending(landlord_phone)
+                    contractor_phone = result.get("contractor_phone")
+                    if contractor_phone:
+                        await clear_contractor_pending(contractor_phone)
+                except Exception as exc:
+                    logger.warning("Failed to clear pending routes", error=str(exc))
                 try:
                     await self._checkpointer.adelete_thread(thread_id)
                 except Exception as exc:

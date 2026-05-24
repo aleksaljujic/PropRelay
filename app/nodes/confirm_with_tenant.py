@@ -9,16 +9,17 @@ from __future__ import annotations
 
 import structlog
 from langgraph.types import interrupt
+from sqlalchemy import select
 
 from app.graph.context import get_node_context
 from app.graph.state import GraphState
-from app.models.ticket import ConversationRole
+from app.models.ticket import ConversationRole, ConversationState
 from app.services.ticket_service import sync_conversation_state
 from app.services.whatsapp import send_text_message
 
 logger = structlog.get_logger(__name__)
 
-_CONFIRM_WORDS = {"yes", "ok", "correct", "da", "tačno", "tacno", "yep", "sure", "👍", "✅"}
+_CONFIRM_WORDS = {"yes", "y", "ok", "correct", "da", "tačno", "tacno", "yep", "sure", "ja", "👍", "✅"}
 
 URGENCY_EMOJI = {"emergency": "🚨", "high": "🔴", "medium": "🟡", "low": "🟢"}
 CATEGORY_EMOJI = {
@@ -27,36 +28,63 @@ CATEGORY_EMOJI = {
 }
 
 
+async def _confirm_prompt_already_sent(db, phone: str, ticket_id: str | None) -> bool:
+    if not ticket_id:
+        return False
+    row = await db.scalar(select(ConversationState).where(ConversationState.phone_number == phone))
+    if not row:
+        return False
+    ctx = row.context or {}
+    return ctx.get("confirm_prompt_sent") == ticket_id
+
+
+def _parse_tenant_reply(reply: str, diagnosis: str, context: dict) -> dict:
+    if reply.lower() in _CONFIRM_WORDS:
+        return {
+            "current_node": "confirm_with_tenant",
+            "tenant_confirmed": True,
+            "resume_value": None,
+        }
+    enriched = f"{diagnosis}\nTenant adds: {reply}"
+    return {
+        "current_node": "confirm_with_tenant",
+        "tenant_confirmed": True,
+        "diagnosis": enriched,
+        "context": {**context, "tenant_note": reply},
+        "resume_value": None,
+    }
+
+
 async def confirm_with_tenant(state: GraphState) -> dict:
     ctx = get_node_context()
     db = ctx.db
+    ticket_id = state.get("ticket_id")
+    context = state.get("context") or {}
 
-    # ── Resume path — tenant replied ──────────────────────────────────────────
     resume = state.get("resume_value")
     if resume is not None:
         reply = str(resume).strip()
-        if reply.lower() in _CONFIRM_WORDS or len(reply) < 4:
-            # Confirmed as-is
+        if reply.lower() in _CONFIRM_WORDS:
+            await send_text_message(
+                state["phone"],
+                "Thanks — forwarded to your landlord for approval.",
+            )
             logger.info("Tenant confirmed diagnosis", phone=state["phone"])
-            return {
-                "current_node": "confirm_with_tenant",
-                "tenant_confirmed": True,
-                "resume_value": None,
-            }
         else:
-            # Tenant corrected / added info — enrich diagnosis
-            original = state.get("diagnosis", "")
-            enriched = f"{original}\nTenant adds: {reply}"
             logger.info("Tenant updated diagnosis", phone=state["phone"])
-            return {
-                "current_node": "confirm_with_tenant",
-                "tenant_confirmed": True,
-                "diagnosis": enriched,
-                "context": {**state.get("context", {}), "tenant_note": reply},
-                "resume_value": None,
-            }
+        return _parse_tenant_reply(reply, state.get("diagnosis", ""), context)
 
-    # ── First pass — send diagnosis summary to tenant ─────────────────────────
+    if await _confirm_prompt_already_sent(db, state["phone"], ticket_id):
+        logger.info("Confirm prompt already sent — waiting for tenant reply", phone=state["phone"])
+        reply = interrupt({"awaiting": "tenant_confirmation"})
+        reply_text = str(reply).strip() if reply else ""
+        if reply_text.lower() in _CONFIRM_WORDS:
+            await send_text_message(
+                state["phone"],
+                "Thanks — forwarded to your landlord for approval.",
+            )
+        return _parse_tenant_reply(reply_text, state.get("diagnosis", ""), context)
+
     diagnosis = state.get("diagnosis", "Issue detected")
     severity = state.get("severity", "unknown")
     urgency = state.get("urgency", "medium")
@@ -82,24 +110,17 @@ async def confirm_with_tenant(state: GraphState) -> dict:
         phone=state["phone"],
         role=ConversationRole.tenant,
         state="confirm_with_tenant",
-        ticket_id=state.get("ticket_id"),
-        context={"awaiting": "tenant_confirmation"},
+        ticket_id=ticket_id,
+        context={"awaiting": "tenant_confirmation", "confirm_prompt_sent": ticket_id},
     )
 
     logger.info("Diagnosis sent to tenant for confirmation", phone=state["phone"])
 
-    # Interrupt — wait for tenant reply
     reply = interrupt({"awaiting": "tenant_confirmation"})
     reply_text = str(reply).strip() if reply else ""
-
-    if reply_text.lower() in _CONFIRM_WORDS or len(reply_text) < 4:
-        return {"current_node": "confirm_with_tenant", "tenant_confirmed": True, "resume_value": None}
-
-    enriched = f"{state.get('diagnosis', '')}\nTenant adds: {reply_text}"
-    return {
-        "current_node": "confirm_with_tenant",
-        "tenant_confirmed": True,
-        "diagnosis": enriched,
-        "context": {**state.get("context", {}), "tenant_note": reply_text},
-        "resume_value": None,
-    }
+    if reply_text.lower() in _CONFIRM_WORDS:
+        await send_text_message(
+            state["phone"],
+            "Thanks — forwarded to your landlord for approval.",
+        )
+    return _parse_tenant_reply(reply_text, diagnosis, context)

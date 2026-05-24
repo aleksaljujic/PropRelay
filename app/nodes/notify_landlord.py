@@ -39,6 +39,19 @@ _APPROVE_WORDS = {"yes", "y", "approve", "approved", "ja", "ok", "da", "👍", "
 _REJECT_WORDS  = {"no", "n", "reject", "rejected", "ne", "nein", "👎"}
 
 
+async def _landlord_report_already_sent(db, tenant_phone: str, ticket_id: str | None) -> bool:
+    if not ticket_id:
+        return False
+    from app.models.ticket import ConversationState
+    row = await db.scalar(
+        select(ConversationState).where(ConversationState.phone_number == tenant_phone)
+    )
+    if not row:
+        return False
+    ctx = row.context or {}
+    return ctx.get("landlord_report_sent") == ticket_id
+
+
 def _format_minutes(m: int | None) -> str:
     if not m:
         return "—"
@@ -189,14 +202,20 @@ async def notify_landlord(state: GraphState) -> dict:
             base_message, contractor_language, context="WhatsApp message to a contractor"
         )
 
+        rec = await get_thread_contractor_recommendation(state["thread_id"])
         logger.info("Landlord approved", custom=(lower not in _APPROVE_WORDS), contractor_lang=contractor_language)
+        if lower in _APPROVE_WORDS:
+            name = state.get("contractor_name") or (rec or {}).get("contractor_name") or "the contractor"
+            await send_text_message(
+                state.get("landlord_phone") or "",
+                f"✅ Dispatched to *{name}*. The tenant and contractor have been notified.",
+            )
         approved: dict = {
             "landlord_approved": True,
             "contractor_message": contractor_message,
             "current_node": "notify_landlord",
             "resume_value": None,
         }
-        rec = await get_thread_contractor_recommendation(state["thread_id"])
         if rec and rec.get("contractor_id"):
             approved["contractor_id"] = rec["contractor_id"]
             approved["contractor_name"] = rec.get("contractor_name")
@@ -204,10 +223,48 @@ async def notify_landlord(state: GraphState) -> dict:
             approved["contractor_candidates"] = [rec["contractor_id"]]
         return approved
 
-    # ── First pass — send to landlord ─────────────────────────────────────────
     landlord_phone = state.get("landlord_phone")
     if not landlord_phone:
         return {"error": "missing_landlord_phone"}
+
+    if await _landlord_report_already_sent(db, state["phone"], state.get("ticket_id")):
+        logger.info("Landlord report already sent — waiting for reply", ticket_id=state.get("ticket_id"))
+        decision = interrupt({"awaiting": "landlord_approval", "ticket_id": state.get("ticket_id")})
+        reply = str(decision).strip() if decision else ""
+        lower = reply.lower()
+        draft = state.get("context", {}).get("contractor_draft", "")
+        contractor_language = state.get("context", {}).get("contractor_language", "en")
+        new_context = state.get("context") or {}
+
+        if lower in _REJECT_WORDS:
+            return {"landlord_approved": False, "current_node": "notify_landlord", "context": new_context, "resume_value": None}
+
+        base_message = draft if lower in _APPROVE_WORDS else reply
+        contractor_message = await translate_message(
+            base_message, contractor_language, context="WhatsApp message to a contractor"
+        )
+        if lower in _APPROVE_WORDS:
+            name = state.get("contractor_name") or "the contractor"
+            await send_text_message(
+                landlord_phone,
+                f"✅ Dispatched to *{name}*. The tenant and contractor have been notified.",
+            )
+        approved_update: dict = {
+            "landlord_approved": True,
+            "contractor_message": contractor_message,
+            "current_node": "notify_landlord",
+            "context": new_context,
+            "resume_value": None,
+        }
+        rec = await get_thread_contractor_recommendation(state["thread_id"])
+        if rec and rec.get("contractor_id"):
+            approved_update["contractor_id"] = rec["contractor_id"]
+            approved_update["contractor_name"] = rec.get("contractor_name")
+            approved_update["contractor_phone"] = rec.get("contractor_phone")
+            approved_update["contractor_candidates"] = [rec["contractor_id"]]
+        return approved_update
+
+    # ── First pass — send to landlord ─────────────────────────────────────────
 
     landlord_msg, draft, contractor_phone, contractor_language, contractor_id, contractor_name = await _build_landlord_message(state, db)
 
@@ -243,7 +300,7 @@ async def notify_landlord(state: GraphState) -> dict:
         role=ConversationRole.tenant,
         state="notify_landlord",
         ticket_id=state.get("ticket_id"),
-        context={"awaiting": "landlord_approval"},
+        context={"awaiting": "landlord_approval", "landlord_report_sent": state.get("ticket_id")},
     )
 
     await register_landlord_pending(
@@ -272,6 +329,11 @@ async def notify_landlord(state: GraphState) -> dict:
     contractor_message = await translate_message(
         base_message, contractor_language, context="WhatsApp message to a contractor"
     )
+    if lower in _APPROVE_WORDS:
+        await send_text_message(
+            landlord_phone,
+            f"✅ Dispatched to *{contractor_name}*. The tenant and contractor have been notified.",
+        )
 
     approved_update: dict = {
         "landlord_approved": True,
