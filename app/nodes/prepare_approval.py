@@ -38,7 +38,13 @@ async def prepare_approval(state: GraphState) -> dict:
         category=state.get("category") or "unknown",
         urgency=state.get("urgency") or "medium",
         diagnosis=diagnosis,
+        root_cause=ai_json.get("root_cause"),
+        safety_risk=ai_json.get("safety_risk") or "none",
+        safety_notes=ai_json.get("safety_notes"),
         estimated_cost=estimated,
+        estimated_duration_minutes=ai_json.get("estimated_duration_minutes"),
+        parts_needed=ai_json.get("parts_needed") or [],
+        tools_needed=ai_json.get("tools_needed") or [],
         recommended_action="Approve professional dispatch",
     )
 

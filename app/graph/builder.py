@@ -31,6 +31,7 @@ from functools import lru_cache
 from langgraph.graph import END, START, StateGraph
 
 from app.graph.routing import (
+    route_at_start,
     route_by_intent,
     route_by_landlord_decision,
     route_by_severity,
@@ -79,7 +80,14 @@ def build_maintenance_graph(*, checkpointer: RedisCheckpointSaver | None = None)
     builder.add_node("rent_status", rent_status)
 
     # ── Edges ─────────────────────────────────────────────────────────────
-    builder.add_edge(START, "identify_intent")
+    builder.add_conditional_edges(
+        START,
+        route_at_start,
+        {
+            "identify_intent": "identify_intent",
+            "prepare_approval": "prepare_approval",
+        },
+    )
 
     builder.add_conditional_edges(
         "identify_intent",
@@ -91,6 +99,7 @@ def build_maintenance_graph(*, checkpointer: RedisCheckpointSaver | None = None)
             "rent_status": "rent_status",
             "forward_to_landlord": "forward_to_landlord",
             "clarify_intent": "clarify_intent",
+            "__end__": END,
         },
     )
     # request_photo / diagnose_issue kept in graph for future use (e.g. photo follow-up)

@@ -8,7 +8,16 @@ from __future__ import annotations
 from app.graph.state import GraphState
 
 
+def route_at_start(state: GraphState) -> str:
+    """Skip to landlord approval when tenant already confirmed (recovery path)."""
+    if state.get("tenant_confirmed") and state.get("ticket_id"):
+        return "prepare_approval"
+    return "identify_intent"
+
+
 def route_by_intent(state: GraphState) -> str:
+    if state.get("completed") or state.get("error") == "confirmation_without_context":
+        return "__end__"
     intent = state.get("intent")
     if intent == "maintenance":
         # Tenant sent a photo → use Vision AI for diagnosis
@@ -30,6 +39,16 @@ def route_by_intent(state: GraphState) -> str:
 
 
 def route_by_severity(state: GraphState) -> str:
+    """
+    Route after tenant confirms the diagnosis.
+
+    Once the tenant explicitly says YES (= "contact your landlord"),
+    we always escalate — even if the AI initially classified the issue
+    as minor. The tenant decides whether they want a fix or self-help,
+    not the AI. self_help remains routable from other entry points.
+    """
+    if state.get("tenant_confirmed"):
+        return "prepare_approval"
     if state.get("severity") == "minor":
         return "self_help"
     return "prepare_approval"
