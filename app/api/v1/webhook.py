@@ -12,7 +12,7 @@ from app.config import settings
 from app.core.redis import get_conversation_state
 from app.database import async_session_factory
 from app.graph.orchestrator import lookup_landlord_by_phone, orchestrator
-from app.services.landlord_commands import handle_landlord_command
+from app.services.landlord_commands import handle_landlord_command, handle_pending_delete_reply
 from app.services.onboarding_service import (
     UNKNOWN_NUMBER_MSG,
     handle_onboarding_reply,
@@ -101,8 +101,12 @@ async def _handle_incoming_message(message: dict, value: dict) -> None:
         # ── Landlord replies (approval flow) ───────────────────────────────
         landlord = await lookup_landlord_by_phone(db, sender_phone)
         if landlord and msg_type == "text":
-            # Pending maintenance approval takes priority — check BEFORE command handler
-            # so landlord YES/NO actually resumes the graph instead of being eaten by LLM
+            # Pending tenant delete confirmation — before maintenance YES/NO
+            if await handle_pending_delete_reply(landlord, text_body, db):
+                log.info("Landlord delete confirmation handled", text=text_body)
+                return
+
+            # Pending maintenance approval — resume graph before command handler
             try:
                 result = await orchestrator.dispatch_landlord_message(landlord, text_body, db)
                 if result is not None:

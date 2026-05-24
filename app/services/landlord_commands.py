@@ -8,9 +8,10 @@ No rigid syntax required — "add my new tenant 064..." works the same as
 from __future__ import annotations
 
 import json
+import re
 import structlog
 import anthropic
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,7 +23,8 @@ from app.models.building import Building
 from app.models.contractor import Contractor
 from app.models.landlord import Landlord
 from app.models.tenant import Tenant
-from app.models.ticket import Ticket, TicketStatus
+from app.models.rent_payment import RentPayment
+from app.models.ticket import ConversationState, Ticket, TicketStatus
 from app.services.onboarding_service import initiate_tenant_onboarding
 from app.services.rent_service import format_status_for_landlord, get_rent_status, mark_paid
 from app.services.ticket_service import set_ticket_status
@@ -344,6 +346,27 @@ _SYSTEM = (
 # Public entry point
 # ---------------------------------------------------------------------------
 
+async def handle_pending_delete_reply(
+    landlord: Landlord,
+    text: str,
+    db: AsyncSession,
+) -> bool:
+    """Handle YES/NO while a tenant removal is awaiting confirmation."""
+    pending_id = await _get_pending_delete(landlord.phone_number)
+    if not pending_id:
+        return False
+
+    lower = text.strip().lower()
+    if lower in ("yes", "da", "confirm", "delete", "yes delete", "potvrdi"):
+        await _exec_confirm_delete(landlord, pending_id, db)
+        return True
+    if lower in ("no", "ne", "cancel", "otkazi"):
+        await _clear_pending_delete(landlord.phone_number)
+        await _reply(landlord.phone_number, "❌ Deletion cancelled.")
+        return True
+    return False
+
+
 async def handle_landlord_command(
     landlord: Landlord,
     text: str,
@@ -358,6 +381,28 @@ async def handle_landlord_command(
         return False
 
     lower = text.strip().lower()
+
+    # ── Direct commands (no Claude API — instant & reliable) ─────────────────
+    if lower in ("tenants", "tenant", "stanari", "stanar"):
+        await _exec_list_tenants(landlord, db)
+        return True
+    if lower in ("help", "commands", "pomoc", "?"):
+        await _exec_help(landlord)
+        return True
+    if lower in ("contractors", "contractor", "workers", "worker", "radnici"):
+        await _exec_list_contractors(landlord, db)
+        return True
+    if lower in ("tickets", "ticket", "requests", "tiketi"):
+        await _exec_list_tickets(landlord, {}, db)
+        return True
+    if lower in ("rent", "rents", "rent overview", "kira"):
+        await _exec_rent_overview(landlord, db)
+        return True
+
+    remove_match = re.match(r"^(?:remove|delete|ukloni)\s+(\d+)$", lower)
+    if remove_match:
+        await _exec_remove_tenant(landlord, {"tenant_id": remove_match.group(1)}, db)
+        return True
 
     # ── Intercept cancel for any pending multi-step flow ─────────────────────
     if lower in ("cancel", "otkazi", "stop", "quit"):
@@ -624,15 +669,47 @@ async def _exec_remove_tenant(landlord: Landlord, params: dict, db: AsyncSession
 
 async def _exec_confirm_delete(landlord: Landlord, tenant_id: str, db: AsyncSession) -> None:
     import uuid as _uuid
+
     tenant = await db.scalar(select(Tenant).where(Tenant.id == _uuid.UUID(tenant_id)))
     if not tenant:
         await _clear_pending_delete(landlord.phone_number)
         await _reply(landlord.phone_number, "⚠️ Tenant no longer exists.")
         return
 
+    if tenant.landlord_id != landlord.id:
+        await _clear_pending_delete(landlord.phone_number)
+        await _reply(landlord.phone_number, "⚠️ That tenant is not on your account.")
+        return
+
     name, unit, phone = tenant.name, tenant.unit_number, tenant.phone_number
-    await db.delete(tenant)
-    await db.commit()
+
+    try:
+        # Clear workflow + list cache in Redis
+        redis = await get_redis()
+        from app.storage.redis_checkpoint import RedisCheckpointSaver
+
+        await RedisCheckpointSaver().adelete_thread(phone)
+        for pattern in (f"lg:ckpt:{phone}", f"lg:writes:{phone}", f"tenant_list:{landlord.phone_number}"):
+            await redis.delete(pattern)
+
+        # Remove dependent rows — tickets block hard delete (tenant_id NOT NULL)
+        await db.execute(
+            delete(ConversationState).where(ConversationState.phone_number == phone)
+        )
+        await db.execute(delete(Ticket).where(Ticket.tenant_id == tenant.id))
+        await db.execute(delete(RentPayment).where(RentPayment.tenant_id == tenant.id))
+
+        await db.delete(tenant)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("Tenant delete failed", tenant_id=tenant_id, error=str(exc))
+        await _reply(
+            landlord.phone_number,
+            "⚠️ Could not remove tenant — please try again or contact support.",
+        )
+        return
+
     await _clear_pending_delete(landlord.phone_number)
     logger.info("Tenant removed by landlord", name=name, unit=unit, phone=phone)
     await _reply(
@@ -664,7 +741,7 @@ async def _exec_resend(landlord: Landlord, params: dict, db: AsyncSession) -> No
 async def _exec_list_tenants(landlord: Landlord, db: AsyncSession) -> None:
     result = await db.execute(
         select(Tenant)
-        .where(Tenant.landlord_id == landlord.id)
+        .where(Tenant.landlord_id == landlord.id, Tenant.active.is_(True))
         .options(selectinload(Tenant.building))
         .order_by(Tenant.unit_number)
     )
@@ -1033,6 +1110,13 @@ async def _exec_message_tenant(landlord: Landlord, params: dict, db: AsyncSessio
 
 async def _reply(phone: str, text: str) -> None:
     try:
-        await send_text_message(phone, text)
+        result = await send_text_message(phone, text)
+        if not result:
+            logger.error("WhatsApp reply returned empty — token may be expired", phone=phone)
     except Exception as exc:
         logger.error("WhatsApp reply failed", phone=phone, error=str(exc))
+        if "401" in str(exc):
+            logger.error(
+                "META_WHATSAPP_TOKEN expired — update .env and restart uvicorn "
+                "(developers.facebook.com → WhatsApp → API Setup → Generate token)"
+            )
