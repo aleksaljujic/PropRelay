@@ -28,12 +28,47 @@ async def identify_intent(state: GraphState) -> dict:
     db = ctx.db
 
     text = state.get("message_text") or ""
-    if not text.strip():
-        # Non-text messages without prior context need a description first
+    media_id = state.get("media_id")
+
+    if not text.strip() and not media_id:
+        # Truly empty — sticker, reaction, location, etc.
         return {
             "current_node": "identify_intent",
             "error": "empty_message",
             "awaiting": "description",
+        }
+
+    if not text.strip() and media_id:
+        # Tenant sent a photo without a caption — treat as maintenance immediately
+        logger.info("Image received without caption — routing to vision diagnosis", phone=state.get("phone"))
+        tenant = await db.scalar(
+            select(Tenant).where(Tenant.id == uuid.UUID(state["tenant_id"]))
+        )
+        ticket_id = state.get("ticket_id")
+        if tenant and not ticket_id:
+            ticket = await create_ticket(
+                db,
+                tenant,
+                description="Tenant submitted a photo",
+                urgency="medium",
+            )
+            ticket_id = str(ticket.id)
+        await sync_conversation_state(
+            db,
+            phone=state["phone"],
+            role=ConversationRole.tenant,
+            state="intent:maintenance",
+            ticket_id=ticket_id,
+            context={"intent": "maintenance"},
+        )
+        return {
+            "intent": "maintenance",
+            "category": "general",
+            "severity": "serious",
+            "urgency": "medium",
+            "diagnosis": "Photo submitted — awaiting vision analysis",
+            "ticket_id": ticket_id,
+            "current_node": "identify_intent",
         }
 
     raw = await _classify_intent(text, language=state.get("language", "de"))
@@ -42,8 +77,9 @@ async def identify_intent(state: GraphState) -> dict:
     try:
         parsed_intent = TenantIntent(raw_intent)
     except ValueError:
-        logger.warning("Unrecognized intent from LLM, defaulting to unknown", raw_intent=raw_intent)
-        parsed_intent = TenantIntent.unknown
+        # Unknown string from LLM — treat as maintenance so tenant gets a real response
+        logger.warning("Unrecognized intent from LLM, defaulting to maintenance", raw_intent=raw_intent)
+        parsed_intent = TenantIntent.maintenance
 
     # Map raw dict → validated schema for the rest of the graph
     classification = IntentClassification(

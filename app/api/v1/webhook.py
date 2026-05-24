@@ -101,7 +101,18 @@ async def _handle_incoming_message(message: dict, value: dict) -> None:
         # ── Landlord replies (approval flow) ───────────────────────────────
         landlord = await lookup_landlord_by_phone(db, sender_phone)
         if landlord and msg_type == "text":
-            # Commands first: register, tenants, help
+            # Pending maintenance approval takes priority — check BEFORE command handler
+            # so landlord YES/NO actually resumes the graph instead of being eaten by LLM
+            try:
+                result = await orchestrator.dispatch_landlord_message(landlord, text_body, db)
+                if result is not None:
+                    log.info("Landlord approval routed to orchestrator")
+                    return
+            except Exception as exc:
+                log.exception("Landlord graph resume error", error=str(exc))
+                # Fall through to command handler if graph resume fails
+
+            # No pending approval — handle as a management command
             try:
                 if await handle_landlord_command(landlord, text_body, db):
                     log.info("Landlord command handled", text=text_body)
@@ -112,12 +123,6 @@ async def _handle_incoming_message(message: dict, value: dict) -> None:
                     sender_phone,
                     "⚠️ Something went wrong processing your command.\nType *help* to see available commands.",
                 )
-                return
-
-            # YES/NO approval routing
-            result = await orchestrator.dispatch_landlord_message(landlord, text_body, db)
-            if result is not None:
-                log.info("Landlord message routed to orchestrator")
                 return
 
             # Unrecognised landlord message — show hint, never fall through to tenant flow

@@ -40,8 +40,8 @@ class Settings(BaseSettings):
     # anthropic_model_smart → Vision AI diagnosis and complex reasoning (Sonnet)
     # anthropic_model_fast  → intent classification and simple responses (Haiku)
     anthropic_api_key: str = ""
-    anthropic_model_smart: str = "claude-sonnet-4-20250514"
-    anthropic_model_fast: str = "claude-haiku-4-5-20251001"
+    anthropic_model_smart: str = "claude-sonnet-4-6"
+    anthropic_model_fast: str = "claude-haiku-4-5"
     llm_max_retries: int = 3
 
     # Orchestration timeouts (seconds)

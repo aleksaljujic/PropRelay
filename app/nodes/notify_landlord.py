@@ -71,12 +71,13 @@ async def _build_landlord_message(state: GraphState, db) -> tuple[str, str, str 
     draft = _build_contractor_draft(state, contractor_name)
 
     tenant_note_line = f"\n📝 Tenant note: _{tenant_note}_" if tenant_note else ""
+    photo_line = "\n📷 _Tenant submitted a photo (see their WhatsApp thread)_" if state.get("media_urls") else ""
 
     landlord_msg = (
         f"{emoji} *Maintenance — unit {state.get('unit_number', '?')}*\n"
         f"Building: {state.get('building_name', '')}\n"
         f"Category: *{category.upper()}* | Urgency: *{urgency.upper()}*\n\n"
-        f"🔍 Diagnosis: {diagnosis}{tenant_note_line}\n"
+        f"🔍 Diagnosis: {diagnosis}{tenant_note_line}{photo_line}\n"
         f"💶 Est. cost: {estimated}\n\n"
         f"👷 Contractor: *{contractor_name}*"
         + (f" ({contractor_phone})" if contractor_phone else "") +

@@ -11,6 +11,10 @@ from app.graph.state import GraphState
 def route_by_intent(state: GraphState) -> str:
     intent = state.get("intent")
     if intent == "maintenance":
+        # Tenant sent a photo → use Vision AI for diagnosis
+        if state.get("media_id"):
+            return "diagnose_issue"
+        # Text-only request → AI already diagnosed from text in identify_intent
         return "confirm_with_tenant"
     if intent == "complaint":
         return "log_complaint"
@@ -18,8 +22,11 @@ def route_by_intent(state: GraphState) -> str:
         return "rent_status"
     if intent == "admin":
         return "forward_to_landlord"
-    # "unknown" or anything unrecognised → ask tenant to clarify (don't bother landlord)
-    return "clarify_intent"
+    if intent == "unknown":
+        # If somehow "unknown" slips through, treat as maintenance
+        return "confirm_with_tenant"
+    # Anything else unrecognised → forward to landlord as admin
+    return "forward_to_landlord"
 
 
 def route_by_severity(state: GraphState) -> str:

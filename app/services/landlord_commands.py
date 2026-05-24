@@ -23,7 +23,8 @@ from app.services.onboarding_service import initiate_tenant_onboarding
 from app.services.rent_service import format_status_for_landlord, get_rent_status, mark_paid
 from app.services.whatsapp import send_text_message
 
-_PENDING_DELETE_TTL = 300  # 5 minutes to confirm
+_PENDING_DELETE_TTL = 300    # 5 min to confirm delete
+_PENDING_REGISTER_TTL = 300  # 5 min to complete registration
 
 
 async def _get_pending_delete(landlord_phone: str) -> str | None:
@@ -40,6 +41,30 @@ async def _clear_pending_delete(landlord_phone: str) -> None:
     redis = await get_redis()
     await redis.delete(f"pending_delete:{landlord_phone}")
 
+
+async def _get_pending_registration(landlord_phone: str) -> dict | None:
+    redis = await get_redis()
+    raw = await redis.get(f"pending_register:{landlord_phone}")
+    return json.loads(raw) if raw else None
+
+
+async def _set_pending_registration(landlord_phone: str, data: dict) -> None:
+    redis = await get_redis()
+    await redis.setex(f"pending_register:{landlord_phone}", _PENDING_REGISTER_TTL, json.dumps(data))
+
+
+async def _clear_pending_registration(landlord_phone: str) -> None:
+    redis = await get_redis()
+    await redis.delete(f"pending_register:{landlord_phone}")
+
+
+def _normalize_phone(raw: str) -> str:
+    """Normalise any phone format to E.164 digits without leading +."""
+    phone = raw.strip().lstrip("+").replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if phone.startswith("0") and len(phone) <= 10:  # Serbian local 06x / 07x
+        phone = "381" + phone[1:]
+    return phone
+
 logger = structlog.get_logger(__name__)
 
 _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
@@ -50,38 +75,17 @@ _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 _TOOLS: list[dict] = [
     {
-        "name": "register_tenant",
+        "name": "start_registration",
         "description": (
-            "Register a new tenant for the landlord's building and send them a "
-            "WhatsApp onboarding message asking for their name. "
-            "Only call this when BOTH a phone number AND a clear apartment/unit number are present."
+            "Start the guided step-by-step tenant registration flow. "
+            "Use when the landlord wants to add, register, or onboard a new tenant — "
+            "regardless of how they phrase it. "
+            "No parameters needed — the bot will ask for phone number and apartment number one at a time."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {
-                "phone": {
-                    "type": "string",
-                    "description": (
-                        "Tenant's phone number in E.164 format WITHOUT the leading +. "
-                        "Remove ALL spaces, dashes, parentheses, and the leading + sign. "
-                        "If the number starts with 0 (local format, e.g. Serbian '064...'), "
-                        "drop the leading 0 and prepend country code 381. "
-                        "Examples: '+381 60 123 4567' → '381601234567', "
-                        "'064 349 2561' → '381643492561'."
-                    ),
-                },
-                "unit": {
-                    "type": "string",
-                    "description": (
-                        "The apartment or unit number INSIDE the building — NOT a street address. "
-                        "A street address looks like 'Jurija Gagarina 131' or 'Main St 5' — that is NOT a unit. "
-                        "A unit looks like '3A', '12', 'B4', 'stan 7'. "
-                        "If the message only contains a street address and no apartment number, "
-                        "do NOT call this tool — call ask_clarification instead."
-                    ),
-                },
-            },
-            "required": ["phone", "unit"],
+            "properties": {},
+            "required": [],
         },
     },
     {
@@ -272,6 +276,45 @@ async def handle_landlord_command(
     if not text.strip():
         return False
 
+    lower = text.strip().lower()
+
+    # ── Intercept cancel for any pending multi-step flow ─────────────────────
+    if lower in ("cancel", "otkazi", "stop", "quit"):
+        await _clear_pending_registration(landlord.phone_number)
+        await _clear_pending_delete(landlord.phone_number)
+        await _reply(landlord.phone_number, "❌ Cancelled.")
+        return True
+
+    # ── Intercept replies for pending step-by-step registration ──────────────
+    pending_reg = await _get_pending_registration(landlord.phone_number)
+    if pending_reg:
+        step = pending_reg.get("step")
+        if step == "awaiting_phone":
+            phone = _normalize_phone(text)
+            if not phone.isdigit() or len(phone) < 7:
+                await _reply(
+                    landlord.phone_number,
+                    "⚠️ That doesn't look like a valid phone number.\n"
+                    "Please send just the number, e.g. *064 349 2561* or *+381 64 349 2561*\n\n"
+                    "Type *cancel* to stop.",
+                )
+                return True
+            await _set_pending_registration(landlord.phone_number, {"step": "awaiting_unit", "phone": phone})
+            await _reply(
+                landlord.phone_number,
+                f"📱 Got it: *{phone}*\n\n"
+                f"🏠 What's their apartment / unit number?\n"
+                f"(e.g. *3A*, *12*, *B4* — NOT the building address)\n\n"
+                f"Type *cancel* to stop.",
+            )
+            return True
+        elif step == "awaiting_unit":
+            unit = text.strip().upper()
+            phone = pending_reg.get("phone", "")
+            await _clear_pending_registration(landlord.phone_number)
+            await _exec_register(landlord, {"phone": phone, "unit": unit}, db)
+            return True
+
     # ── Intercept YES/NO for pending delete confirmation ─────────────────────
     pending_id = await _get_pending_delete(landlord.phone_number)
     if pending_id:
@@ -314,10 +357,10 @@ async def handle_landlord_command(
 
     logger.info("Landlord tool dispatched", tool=tool_name, input=tool_input)
 
-    if tool_name == "add_contractor":
+    if tool_name == "start_registration":
+        await _exec_start_registration(landlord)
+    elif tool_name == "add_contractor":
         await _exec_add_contractor(landlord, tool_input, db)
-    elif tool_name == "register_tenant":
-        await _exec_register(landlord, tool_input, db)
     elif tool_name == "remove_tenant":
         await _exec_remove_tenant(landlord, tool_input, db)
     elif tool_name == "resend_onboarding":
@@ -344,8 +387,20 @@ async def handle_landlord_command(
 # Tool implementations
 # ---------------------------------------------------------------------------
 
+async def _exec_start_registration(landlord: Landlord) -> None:
+    """Kick off the guided step-by-step registration flow."""
+    await _set_pending_registration(landlord.phone_number, {"step": "awaiting_phone"})
+    await _reply(
+        landlord.phone_number,
+        "➕ *Add new tenant*\n\n"
+        "📱 What's the tenant's phone number?\n"
+        "(e.g. *064 349 2561* or *+381 64 349 2561*)\n\n"
+        "Type *cancel* to stop.",
+    )
+
+
 async def _exec_register(landlord: Landlord, params: dict, db: AsyncSession) -> None:
-    phone = str(params.get("phone", "")).strip().lstrip("+").replace(" ", "").replace("-", "")
+    phone = _normalize_phone(str(params.get("phone", "")))
     unit = str(params.get("unit", "")).strip().upper()
 
     if not phone or not unit:
@@ -642,7 +697,8 @@ async def _exec_help(landlord: Landlord) -> None:
     await _reply(
         landlord.phone_number,
         "👋 *PropFlow — what you can say:*\n\n"
-        "➕ *Add tenant:* _register 381641234567 apartment 3A_\n"
+        "➕ *Add tenant:* _register_ or _add new tenant_\n"
+        "   → I'll ask for phone and apartment step by step\n"
         "📋 *List tenants:* _who are my tenants_\n"
         "🗑️ *Remove tenant:* _remove 2_ (use number from list)\n"
         "🔄 *Reset stuck tenant:* _reset 1_ (clears stuck workflow)\n\n"
@@ -650,6 +706,7 @@ async def _exec_help(landlord: Landlord) -> None:
         "  _who paid rent_ — full overview\n"
         "  _mark paid 1_ — mark tenant #1 as paid\n"
         "  _mark paid 2 amount 800_ — partial payment\n\n"
+        "Type *cancel* at any time to stop what you're doing.\n"
         "You can write naturally — I'll understand! 🤖",
     )
 

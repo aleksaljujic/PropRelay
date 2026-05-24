@@ -63,8 +63,8 @@ Classify the tenant message and return ONLY valid JSON, no markdown, no explanat
 
 JSON schema:
 {
-  "intent": "maintenance|complaint|rent_query|admin|unknown",
-  "category": "plumbing|electrical|hvac|structural|appliance|general|unknown",
+  "intent": "maintenance|complaint|rent_query|admin",
+  "category": "plumbing|electrical|hvac|structural|appliance|general",
   "severity": "minor|serious",
   "urgency": "low|medium|high|emergency",
   "diagnosis": "brief description of the specific problem observed (1-2 sentences)",
@@ -72,23 +72,23 @@ JSON schema:
   "reasoning": "one sentence"
 }
 
-Intent guide:
-- maintenance: any physical problem with the apartment (broken, leaking, not working)
-- complaint: noise, neighbors, non-physical issues
-- rent_query: asking about rent payment, how much they owe, if they paid, due date
-- admin: general questions, documents, other
+RULES — always pick the best matching intent, never leave intent empty:
+- maintenance: ANY physical problem with the apartment or its systems — broken, leaking, not working, damaged, smells, no heat/water/power. When in doubt, choose maintenance.
+- complaint: noise, neighbor disputes, non-physical issues
+- rent_query: rent payment, amount owed, due date, payment status
+- admin: documents, contracts, keys, other non-physical administrative requests
 
-Severity guide (for maintenance only):
-- minor: small cosmetic or low-impact issues — dripping tap, paint peeling, squeaky door
-- serious: significant impact on habitability — broken boiler, no hot water, leaking pipe, broken lock
+Severity guide (for maintenance):
+- minor: cosmetic or low-impact — dripping tap, paint peeling, squeaky door, small stain
+- serious: significant impact on habitability — broken boiler, no hot water, leaking pipe, broken lock, no electricity, flooding, gas smell
 
 Urgency guide:
-- emergency: gas leak, flooding, no heating in winter, fire risk
-- high: no hot water, broken lock, toilet not working
-- medium: dripping tap, broken appliance, heating issue
-- low: cosmetic damage, minor inconvenience
+- emergency: gas leak, flooding, no heating in winter, fire risk, no electricity
+- high: no hot water, broken lock, toilet not working, burst pipe
+- medium: dripping tap, broken appliance, heating issue, damaged door
+- low: cosmetic damage, minor inconvenience, paint, squeaks
 
-Diagnosis: write a clear, professional 1-2 sentence description of what the problem likely is, suitable for a contractor. For non-maintenance intents write null.""",
+Diagnosis: 1-2 sentence professional description suitable for a contractor. Write null for non-maintenance intents.""",
         messages=[{
             "role": "user",
             "content": f"Tenant message (language: {language}):\n{message}"
@@ -97,13 +97,13 @@ Diagnosis: write a clear, professional 1-2 sentence description of what the prob
 
     text = response.content[0].text.strip()
     return _parse_json(text, fallback={
-        "intent": "admin",
-        "category": "unknown",
-        "severity": "minor",
+        "intent": "maintenance",   # safer: never silently discard a repair request
+        "category": "general",
+        "severity": "serious",
         "urgency": "medium",
         "diagnosis": None,
-        "confidence": 0.5,
-        "reasoning": "parse error — treated as admin",
+        "confidence": 0.3,
+        "reasoning": "parse error — defaulting to maintenance triage",
     })
 
 

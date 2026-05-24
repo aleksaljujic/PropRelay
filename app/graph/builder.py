@@ -86,6 +86,7 @@ def build_maintenance_graph(*, checkpointer: RedisCheckpointSaver | None = None)
         route_by_intent,
         {
             "confirm_with_tenant": "confirm_with_tenant",
+            "diagnose_issue": "diagnose_issue",   # image path: Vision AI diagnosis
             "log_complaint": "log_complaint",
             "rent_status": "rent_status",
             "forward_to_landlord": "forward_to_landlord",
